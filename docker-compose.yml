@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  dpvo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USERNAME: developer
+        USER_UID: 1000
+        USER_GID: 1000
+    image: dpvo:latest
+    container_name: dpvo-dev
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
+      - DISPLAY=${DISPLAY:-:0}
+      - CUDA_HOME=/usr/local/cuda
+    volumes:
+      - .:/home/developer/workspace/DPVO
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${HOME}/.Xauthority:/home/developer/.Xauthority:ro
+      # Optional: mount datasets directory separately for persistence
+      # - ./datasets:/home/developer/workspace/DPVO/datasets
+      # - ./checkpoints:/home/developer/workspace/DPVO/checkpoints
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    privileged: true
+    stdin_open: true
+    tty: true
+    working_dir: /home/developer/workspace/DPVO
+    command: /bin/bash

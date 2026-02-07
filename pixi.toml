@@ -1,0 +1,39 @@
+[workspace]
+name = "dpvo"
+version = "0.1.0"
+description = "Deep Patch Visual Odometry"
+channels = ["nvidia", "conda-forge"]
+platforms = ["linux-64"]
+
+[tasks]
+build = "pip install -e . --no-build-isolation"
+demo = "python demo.py"
+train = "python train.py"
+
+[dependencies]
+python = "3.10.*"
+pip = "*"
+cmake = "*"
+ninja = "*"
+gcc = "<=13"
+gxx = "<=13"
+
+[pypi-dependencies]
+tensorboard = "*"
+numba = "*"
+tqdm = "*"
+einops = "*"
+pypose = "*"
+kornia = "*"
+numpy = "==1.26.4"
+plyfile = "*"
+evo = "*"
+opencv-python = "*"
+yacs = "*"
+torch       = { version = "*", index = "https://download.pytorch.org/whl/cu124" }
+torchvision = { version = "*", index = "https://download.pytorch.org/whl/cu124" }
+torchaudio  = { version = "*", index = "https://download.pytorch.org/whl/cu124" }
+
+
+[system-requirements]
+cuda = "12"

@@ -1,0 +1,61 @@
+# Git
+.git
+.gitignore
+.gitmodules
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info
+dist
+build
+eggs
+parts
+bin
+var
+sdist
+develop-eggs
+.installed.cfg
+lib
+lib64
+.eggs
+
+# Jupyter
+.ipynb_checkpoints
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Build directories
+Pangolin/build
+DBoW2/build
+DPViewer/build
+DPRetrieval/build
+
+# Data and models (large files)
+checkpoints
+movies
+datasets/*.pickle
+*.zip
+*.tar
+*.tar.gz
+
+# Logs
+logs/*.txt
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+.cache
+
+# Docker
+Dockerfile
+.dockerignore
+.devcontainer

@@ -1,0 +1,65 @@
+{
+    "name": "DPVO Development Container",
+    "build": {
+        "dockerfile": "../Dockerfile",
+        "context": "..",
+        "args": {
+            "USERNAME": "mikexyl",
+            "USER_UID": "1000",
+            "USER_GID": "1000"
+        }
+    },
+    "runArgs": [
+        "--gpus",
+        "all",
+        "--ipc=host",
+        "--ulimit",
+        "memlock=-1",
+        "--ulimit",
+        "stack=67108864",
+        "--privileged"
+    ],
+    "containerEnv": {
+        "NVIDIA_VISIBLE_DEVICES": "all",
+        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,graphics,display",
+        "DISPLAY": "${localEnv:DISPLAY}",
+        "CUDA_HOME": "/usr/local/cuda",
+        "TORCH_CUDA_ARCH_LIST": "7.0;7.5;8.0;8.6;8.9;9.0"
+    },
+    "mounts": [
+        "source=${localEnv:HOME}/.Xauthority,target=/home/developer/.Xauthority,type=bind,consistency=cached",
+        "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
+        "source=/data1,target=/data,type=bind,consistency=cached"
+    ],
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/developer/workspace/DPVO,type=bind,consistency=cached",
+    "workspaceFolder": "/home/developer/workspace/DPVO",
+    "remoteUser": "developer",
+    "postCreateCommand": "bash .devcontainer/post-create.sh",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-toolsai.jupyter",
+                "ms-vscode.cpptools",
+                "nvidia.nsight-vscode-edition",
+                "eamodio.gitlens",
+                "mhutchie.git-graph"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/bin/python3",
+                "python.analysis.typeCheckingMode": "basic",
+                "editor.formatOnSave": true,
+                "terminal.integrated.defaultProfile.linux": "bash"
+            }
+        }
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": true,
+            "configureZshAsDefaultShell": true,
+            "installOhMyZsh": true,
+            "username": "developer"
+        }
+    }
+}
