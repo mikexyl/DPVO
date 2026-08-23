@@ -5,6 +5,7 @@ import os.path as osp
 
 # RGBD-Dataset
 from .tartan import TartanAir
+from .tartan_v2 import TartanAirV2
 
 def dataset_factory(dataset_list, **kwargs):
     """ create a combined dataset """
@@ -13,6 +14,7 @@ def dataset_factory(dataset_list, **kwargs):
 
     dataset_map = { 
         'tartan': (TartanAir, ),
+        'tartan_v2': (TartanAirV2, ),
     }
 
     db_list = []

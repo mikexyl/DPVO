@@ -54,5 +54,5 @@ class Logger:
             self.writer.add_scalar(key, results[key], self.total_steps)
 
     def close(self):
-        self.writer.close()
-
+        if self.writer is not None:
+            self.writer.close()

@@ -3,6 +3,7 @@ import os
 import argparse
 import numpy as np
 from collections import OrderedDict
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
@@ -15,8 +16,6 @@ from dpvo.logger import Logger
 import torch.nn.functional as F
 
 from dpvo.net import VONet
-from evaluate_tartan import evaluate as validate
-
 
 def show_image(image):
     image = image.permute(1, 2, 0).cpu().numpy()
@@ -47,8 +46,13 @@ def train(args):
     # legacy ddp code
     rank = 0
 
-    db = dataset_factory(['tartan'], datapath="datasets/TartanAir", n_frames=args.n_frames)
-    train_loader = DataLoader(db, batch_size=1, shuffle=True, num_workers=4)
+    datapath = args.datapath
+    if datapath is None:
+        datapath = "datasets/TartanAir" if args.dataset == "tartan" else "datasets/tartanair-v2"
+    db = dataset_factory([args.dataset], datapath=datapath, n_frames=args.n_frames)
+    train_loader = DataLoader(
+        db, batch_size=1, shuffle=True, num_workers=args.num_workers,
+        pin_memory=True, persistent_workers=args.num_workers > 0)
 
     net = VONet()
     net.train()
@@ -67,6 +71,7 @@ def train(args):
         args.lr, args.steps, pct_start=0.01, cycle_momentum=False, anneal_strategy='linear')
 
     if rank == 0:
+        Path("checkpoints").mkdir(exist_ok=True)
         logger = Logger(args.name, scheduler)
 
     total_steps = 0
@@ -141,29 +146,42 @@ def train(args):
             if rank == 0:
                 logger.push(metrics)
 
-            if total_steps % 10000 == 0:
+            checkpoint_step = total_steps % args.checkpoint_freq == 0 or total_steps == args.steps
+            if checkpoint_step:
                 torch.cuda.empty_cache()
 
                 if rank == 0:
                     PATH = 'checkpoints/%s_%06d.pth' % (args.name, total_steps)
                     torch.save(net.state_dict(), PATH)
 
-                validation_results = validate(None, net)
-                if rank == 0:
-                    logger.write_dict(validation_results)
+                if not args.skip_validation:
+                    from evaluate_tartan import evaluate as validate
+                    validation_results = validate(None, net)
+                    if rank == 0:
+                        logger.write_dict(validation_results)
 
                 torch.cuda.empty_cache()
                 net.train()
+
+            if total_steps >= args.steps:
+                if rank == 0:
+                    logger.close()
+                return
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--name', default='bla', help='name your experiment')
     parser.add_argument('--ckpt', help='checkpoint to restore')
+    parser.add_argument('--dataset', choices=['tartan', 'tartan_v2'], default='tartan')
+    parser.add_argument('--datapath', help='dataset root (defaults to the repository dataset path)')
     parser.add_argument('--steps', type=int, default=240000)
     parser.add_argument('--lr', type=float, default=0.00008)
     parser.add_argument('--clip', type=float, default=10.0)
     parser.add_argument('--n_frames', type=int, default=15)
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--checkpoint_freq', type=int, default=10000)
+    parser.add_argument('--skip_validation', action='store_true')
     parser.add_argument('--pose_weight', type=float, default=10.0)
     parser.add_argument('--flow_weight', type=float, default=0.1)
     args = parser.parse_args()

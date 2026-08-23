@@ -1,4 +1,13 @@
+import os
 from pathlib import Path
+
+import matplotlib
+from evo.tools.settings import SETTINGS
+
+plot_backend = os.environ.get("MPLBACKEND")
+if plot_backend or not os.environ.get("DISPLAY"):
+    SETTINGS.plot_backend = plot_backend or "Agg"
+    matplotlib.use(SETTINGS.plot_backend)
 
 import matplotlib.pyplot as plt
 import numpy as np

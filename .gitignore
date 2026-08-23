@@ -107,9 +107,14 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.pixi/
 env/
 venv/
 ENV/
+
+# Local inference outputs
+saved_trajectories/
+trajectory_plots/
 env.bak/
 venv.bak/
 
