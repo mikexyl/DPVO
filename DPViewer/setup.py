@@ -125,7 +125,7 @@ setup(
     version="0.0.1",
     author="Zachary Teed",
     packages=['dpviewer'],
-    ext_modules=[CMakeExtension("dpviewer")],
+    ext_modules=[CMakeExtension("dpviewerx")],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
     extras_require={"test": ["pytest"]},

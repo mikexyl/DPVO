@@ -1,0 +1,62 @@
+[workspace]
+name = "dpvo-blackwell"
+version = "0.1.0"
+description = "DPVO inference environment for NVIDIA Blackwell GPUs"
+channels = ["nvidia", "conda-forge"]
+platforms = [
+  { name = "linux-64-cuda128", platform = "linux-64", cuda = "12.8", glibc = "2.31" },
+]
+requires-pixi = ">=0.76"
+
+[dependencies]
+python = "3.10.*"
+pip = "*"
+setuptools = "*"
+wheel = "*"
+ninja = "*"
+cmake = "3.31.*"
+pkg-config = "*"
+gcc_linux-64 = "13.*"
+gxx_linux-64 = "13.*"
+cuda-nvcc = "12.8.*"
+cuda-cudart-dev = "12.8.*"
+cuda-cudart-static = "12.8.*"
+cuda-libraries-dev = "12.8.*"
+cuda-version = "12.8.*"
+cuda-cccl = "12.8.*"
+eigen = "3.4.*"
+numpy = "1.26.4.*"
+
+[pypi-dependencies]
+torch = { version = "==2.7.1", index = "https://download.pytorch.org/whl/cu128" }
+torchvision = { version = "==0.22.1", index = "https://download.pytorch.org/whl/cu128" }
+torch-scatter = { url = "https://data.pyg.org/whl/torch-2.7.0%2Bcu128/torch_scatter-2.1.2%2Bpt27cu128-cp310-cp310-linux_x86_64.whl" }
+tensorboard = "*"
+numba = "*"
+tqdm = "*"
+einops = "*"
+pypose = "*"
+kornia = "*"
+plyfile = "*"
+evo = "*"
+opencv-python = "*"
+yacs = "*"
+matplotlib = "*"
+rerun-sdk = "==0.23.1"
+rosbags = "==0.11.5"
+
+[activation.env]
+PYTHONNOUSERSITE = "1"
+MPLBACKEND = "Agg"
+TORCH_CUDA_ARCH_LIST = "12.0"
+MAX_JOBS = "8"
+PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
+
+[tasks]
+build = { cmd = "python -m pip install --no-build-isolation -e ../.." }
+verify = { cmd = "python -c \"import torch, torch_scatter, cuda_ba, cuda_corr, lietorch_backends; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'device', torch.cuda.get_device_name()); print('capability', torch.cuda.get_device_capability()); print('DPVO extensions: OK')\"", depends-on = ["build"] }
+configure-dbow2 = { cmd = "cmake -S ../../DBoW2 -B ../../DBoW2/build-blackwell -DCMAKE_BUILD_TYPE=Release -DBUILD_Demo=OFF -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX" }
+build-dbow2 = { cmd = "cmake --build ../../DBoW2/build-blackwell --parallel 8", depends-on = ["configure-dbow2"] }
+install-dbow2 = { cmd = "cmake --install ../../DBoW2/build-blackwell", depends-on = ["build-dbow2"] }
+build-retrieval = { cmd = "CMAKE_ARGS=\"-DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4\" python -m pip install --no-build-isolation -e ../../DPRetrieval", depends-on = ["install-dbow2"] }
+verify-classic = { cmd = "python -c \"import dpretrieval; print('DPRetrieval', dpretrieval.__version__, 'OK')\"", depends-on = ["build-retrieval"] }

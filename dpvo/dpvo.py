@@ -19,7 +19,17 @@ Id = SE3.Identity(1, device="cuda")
 
 class DPVO:
 
-    def __init__(self, cfg, network, ht=480, wd=640, viz=False):
+    def __init__(
+        self,
+        cfg,
+        network,
+        ht=480,
+        wd=640,
+        viz=False,
+        viewer=None,
+        viewer_output=None,
+        viewer_connect=None,
+    ):
         self.cfg = cfg
         self.load_weights(network)
         self.is_initialized = False
@@ -76,8 +86,9 @@ class DPVO:
         self.pyramid = (self.fmap1_, self.fmap2_)
 
         self.viewer = None
-        if viz:
-            self.start_viewer()
+        viewer = viewer or ("pangolin" if viz else None)
+        if viewer is not None:
+            self.start_viewer(viewer, viewer_output, viewer_connect)
 
     def load_long_term_loop_closure(self):
         try:
@@ -111,17 +122,39 @@ class DPVO:
         self.network.cuda()
         self.network.eval()
 
-    def start_viewer(self):
-        from dpviewer import Viewer
+    def start_viewer(
+        self,
+        viewer="pangolin",
+        viewer_output=None,
+        viewer_connect=None,
+    ):
+        if viewer == "pangolin":
+            from dpviewer import Viewer
 
-        intrinsics_ = torch.zeros(1, 4, dtype=torch.float32, device="cuda")
+            intrinsics_ = torch.zeros(1, 4, dtype=torch.float32, device="cuda")
 
-        self.viewer = Viewer(
-            self.image_,
-            self.pg.poses_,
-            self.pg.points_,
-            self.pg.colors_,
-            intrinsics_)
+            self.viewer = Viewer(
+                self.image_,
+                self.pg.poses_,
+                self.pg.points_,
+                self.pg.colors_,
+                intrinsics_)
+        elif viewer == "rerun":
+            from .rerun_viewer import RerunViewer
+
+            self.viewer = RerunViewer(
+                self.pg,
+                height=self.ht,
+                width=self.wd,
+                save_path=viewer_output,
+                connect_url=viewer_connect,
+            )
+        else:
+            raise ValueError(f"Unknown viewer: {viewer}")
+
+    def update_viewer(self, intrinsics):
+        if self.viewer is not None and hasattr(self.viewer, "update_state"):
+            self.viewer.update_state(intrinsics, self.n, self.m)
 
     @property
     def poses(self):
@@ -441,6 +474,7 @@ class DPVO:
         if self.n > 0 and not self.is_initialized:
             if self.motion_probe() < 2.0:
                 self.pg.delta[self.counter - 1] = (self.counter - 2, Id[0])
+                self.update_viewer(intrinsics)
                 return
 
         self.n += 1
@@ -471,3 +505,5 @@ class DPVO:
         if self.cfg.CLASSIC_LOOP_CLOSURE:
             self.long_term_lc.attempt_loop_closure(self.n)
             self.long_term_lc.lc_callback()
+
+        self.update_viewer(intrinsics)

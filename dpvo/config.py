@@ -32,6 +32,7 @@ _C.GLOBAL_OPT_FREQ = 15
 
 # Classic loop closure
 _C.CLASSIC_LOOP_CLOSURE = False
+_C.ORB_VOCAB_PATH = "ORBvoc.txt"
 _C.LOOP_CLOSE_WINDOW_SIZE = 3
 _C.LOOP_RETR_THRESH = 0.04
 

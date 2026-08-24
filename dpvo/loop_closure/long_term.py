@@ -23,7 +23,7 @@ class LongTermLoopClosure:
         self.cfg = cfg
 
         # Data structures to manage retrieval
-        self.retrieval = RetrievalDBOW()
+        self.retrieval = RetrievalDBOW(self.cfg.ORB_VOCAB_PATH)
         self.imcache = ImageCache()
 
         # Process to run PGO in parallel

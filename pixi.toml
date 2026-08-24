@@ -1,22 +1,43 @@
 [workspace]
 name = "dpvo"
 version = "0.1.0"
-description = "Deep Patch Visual Odometry"
-channels = ["nvidia", "conda-forge"]
-platforms = ["linux-64"]
-
-[tasks]
-build = "pip install -e . --no-build-isolation"
-demo = "python demo.py"
-train = "python train.py"
+description = "Local CUDA environment for DPVO training and inference"
+channels = ["pyg", "pytorch", "nvidia", "conda-forge"]
+platforms = [
+  { name = "linux-64-cuda121", platform = "linux-64", cuda = "12.1", glibc = "2.31" },
+]
+requires-pixi = ">=0.76"
 
 [dependencies]
 python = "3.10.*"
 pip = "*"
-cmake = "*"
+setuptools = "*"
+wheel = "*"
 ninja = "*"
-gcc = "<=13"
-gxx = "<=13"
+cmake = "3.29.*"
+pkg-config = "*"
+gcc_linux-64 = "11.4.*"
+gxx_linux-64 = "11.4.*"
+cuda-nvcc = "12.1.*"
+cuda-cudart-dev = "12.1.*"
+cuda-cudart-static = "12.1.*"
+cuda-libraries-dev = "12.1.*"
+cuda-version = "12.1.*"
+cuda-cccl = "12.1.*"
+eigen = "3.4.*"
+glew = "*"
+libgl-devel = "*"
+libegl-devel = "*"
+libglvnd-devel = "*"
+libopengl-devel = "*"
+xorg-libx11 = "*"
+xorg-libxext = "*"
+xorg-libxi = "*"
+numpy = "1.26.4.*"
+pytorch = "2.3.1.*"
+torchvision = "0.18.*"
+pytorch-cuda = "12.1.*"
+pytorch-scatter = "2.1.2.*"
 
 [pypi-dependencies]
 tensorboard = "*"
@@ -25,15 +46,23 @@ tqdm = "*"
 einops = "*"
 pypose = "*"
 kornia = "*"
-numpy = "==1.26.4"
 plyfile = "*"
 evo = "*"
 opencv-python = "*"
 yacs = "*"
-torch       = { version = "*", index = "https://download.pytorch.org/whl/cu124" }
-torchvision = { version = "*", index = "https://download.pytorch.org/whl/cu124" }
-torchaudio  = { version = "*", index = "https://download.pytorch.org/whl/cu124" }
+matplotlib = "*"
+rerun-sdk = "==0.23.1"
 
+[activation.env]
+PYTHONNOUSERSITE = "1"
+MPLBACKEND = "Agg"
+TORCH_CUDA_ARCH_LIST = "8.9"
+MAX_JOBS = "6"
+PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
 
-[system-requirements]
-cuda = "12"
+[tasks]
+build = { cmd = "python -m pip install --no-build-isolation -e ." }
+verify = { cmd = "python -c \"import torch, cuda_ba, cuda_corr, lietorch_backends; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available()); print('DPVO extensions: OK')\"", depends-on = ["build"] }
+configure-pangolin = { cmd = "cmake -S Pangolin -B Pangolin/build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF -DBUILD_TOOLS=OFF -DBUILD_PANGOLIN_PYTHON=OFF" }
+build-pangolin = { cmd = "cmake --build Pangolin/build --parallel 6", depends-on = ["configure-pangolin"] }
+build-viewer = { cmd = "CMAKE_ARGS=\"-DCMAKE_PREFIX_PATH=$PIXI_PROJECT_ROOT/Pangolin/build\" python -m pip install --no-build-isolation -e ./DPViewer", depends-on = ["build-pangolin"] }

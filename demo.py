@@ -22,7 +22,19 @@ def show_image(image, t=0):
     cv2.waitKey(t)
 
 @torch.no_grad()
-def run(cfg, network, imagedir, calib, stride=1, skip=0, viz=False, timeit=False):
+def run(
+    cfg,
+    network,
+    imagedir,
+    calib,
+    stride=1,
+    skip=0,
+    viz=False,
+    timeit=False,
+    viewer=None,
+    viewer_output=None,
+    viewer_connect=None,
+):
 
     slam = None
     queue = Queue(maxsize=8)
@@ -43,7 +55,16 @@ def run(cfg, network, imagedir, calib, stride=1, skip=0, viz=False, timeit=False
 
         if slam is None:
             _, H, W = image.shape
-            slam = DPVO(cfg, network, ht=H, wd=W, viz=viz)
+            slam = DPVO(
+                cfg,
+                network,
+                ht=H,
+                wd=W,
+                viz=viz,
+                viewer=viewer,
+                viewer_output=viewer_output,
+                viewer_connect=viewer_connect,
+            )
 
         with Timer("SLAM", enabled=timeit):
             slam(t, image, intrinsics)
@@ -67,7 +88,27 @@ if __name__ == '__main__':
     parser.add_argument('--skip', type=int, default=0)
     parser.add_argument('--config', default="config/default.yaml")
     parser.add_argument('--timeit', action='store_true')
-    parser.add_argument('--viz', action="store_true")
+    viewer_group = parser.add_mutually_exclusive_group()
+    viewer_group.add_argument(
+        '--viz',
+        action="store_true",
+        help="visualize with the legacy Pangolin viewer",
+    )
+    viewer_group.add_argument(
+        '--viewer',
+        choices=["pangolin", "rerun"],
+        help="select a live visualization backend",
+    )
+    parser.add_argument(
+        '--rerun-save',
+        metavar="PATH",
+        help="save Rerun data to an .rrd file instead of spawning the viewer",
+    )
+    parser.add_argument(
+        '--rerun-connect',
+        metavar="URL",
+        help="stream to a Rerun viewer, e.g. rerun+http://host:9876/proxy",
+    )
     parser.add_argument('--plot', action="store_true")
     parser.add_argument('--opts', nargs='+', default=[])
     parser.add_argument('--save_ply', action="store_true")
@@ -75,13 +116,36 @@ if __name__ == '__main__':
     parser.add_argument('--save_trajectory', action="store_true")
     args = parser.parse_args()
 
+    if args.rerun_save and args.rerun_connect:
+        parser.error("--rerun-save and --rerun-connect are mutually exclusive")
+    if (args.rerun_save or args.rerun_connect) and (
+        args.viz or args.viewer == "pangolin"
+    ):
+        parser.error("Rerun output options cannot be combined with Pangolin")
+
+    viewer = args.viewer or (
+        "rerun" if args.rerun_save or args.rerun_connect else None
+    )
+
     cfg.merge_from_file(args.config)
     cfg.merge_from_list(args.opts)
 
     print("Running with config...")
     print(cfg)
 
-    (poses, tstamps), (points, colors, calib) = run(cfg, args.network, args.imagedir, args.calib, args.stride, args.skip, args.viz, args.timeit)
+    (poses, tstamps), (points, colors, calib) = run(
+        cfg,
+        args.network,
+        args.imagedir,
+        args.calib,
+        stride=args.stride,
+        skip=args.skip,
+        viz=args.viz,
+        timeit=args.timeit,
+        viewer=viewer,
+        viewer_output=args.rerun_save,
+        viewer_connect=args.rerun_connect,
+    )
     trajectory = PoseTrajectory3D(positions_xyz=poses[:,:3], orientations_quat_wxyz=poses[:, [6, 3, 4, 5]], timestamps=tstamps)
 
     if args.save_ply:
@@ -100,4 +164,3 @@ if __name__ == '__main__':
 
 
         
-

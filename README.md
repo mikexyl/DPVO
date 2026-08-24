@@ -100,18 +100,35 @@ pip install ./DPRetrieval
 ```
 
 ## Demos
-DPVO can be run on any video or image directory with a single command. Note you will need to have installed DPViewer to visualize the reconstructions in real-time. You can also save the completed reconstructions and view them in COLMAP. The pretrained models can be downloaded from google drive [models.zip](https://drive.google.com/file/d/1dRqftpImtHbbIPNBIseCv9EvrlHEnjhX/view?usp=sharing) if you have not already run the download script. 
+DPVO can be run on any video or image directory with a single command. The
+Pangolin backend requires DPViewer; Rerun is available as an alternative. You
+can also save completed reconstructions and view them in COLMAP. The pretrained
+models can be downloaded from google drive
+[models.zip](https://drive.google.com/file/d/1dRqftpImtHbbIPNBIseCv9EvrlHEnjhX/view?usp=sharing)
+if you have not already run the download script.
 
 
 ```bash
 python demo.py \
     --imagedir=<path to image directory or video> \
     --calib=<path to calibration file> \
-    --viz # enable visualization
-    --plot # save trajectory plot
-    --save_ply # save point cloud as a .ply file
-    --save_trajectory # save the predicted trajectory as .txt in TUM format
-    --save_colmap # save point cloud + trajectory in the standard COLMAP text format
+    --viewer=rerun \
+    --plot \
+    --save_ply \
+    --save_trajectory \
+    --save_colmap
+```
+
+Use `--viewer=rerun` for Rerun, `--viewer=pangolin` for Pangolin, or `--viz`
+as the backwards-compatible Pangolin flag.
+
+Rerun can also write a recording without opening a window. This is useful on
+remote or headless machines:
+
+```bash
+python demo.py --imagedir=<path> --calib=<path> \
+    --viewer=rerun --rerun-save=rerun_recordings/result.rrd
+pixi run rerun rerun_recordings/result.rrd
 ```
 
 ### iPhone
