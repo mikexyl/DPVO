@@ -1,0 +1,13 @@
+std_msgs/Header header
+string robot_id
+string session_id
+uint64 keyframe_id
+float64 timestamp
+float32[7] pose
+uint32 point_count
+uint32 descriptor_dim
+uint32 image_width
+uint32 image_height
+float32[] points_xyz
+float32[] keypoints_uv
+float32[] descriptors

@@ -152,6 +152,9 @@ dist
 *.vscode/
 *.pth
 tests
+!tests/
+!tests/test_distributed_loop_closure.py
+!tests/test_centralized_pgo.py
 checkpoints
 runs
 cache

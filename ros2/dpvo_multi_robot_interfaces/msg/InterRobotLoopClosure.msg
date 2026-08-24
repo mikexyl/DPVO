@@ -1,0 +1,15 @@
+std_msgs/Header header
+string query_robot_id
+string query_session_id
+uint64 query_keyframe_id
+string match_robot_id
+string match_session_id
+uint64 match_keyframe_id
+float32 bow_score
+float32[7] query_pose
+float32[7] match_pose
+geometry_msgs/Transform query_to_match
+float64 scale
+uint32 inliers
+float32 inlier_ratio
+string verification_method

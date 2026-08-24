@@ -66,3 +66,11 @@ verify = { cmd = "python -c \"import torch, cuda_ba, cuda_corr, lietorch_backend
 configure-pangolin = { cmd = "cmake -S Pangolin -B Pangolin/build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF -DBUILD_TOOLS=OFF -DBUILD_PANGOLIN_PYTHON=OFF" }
 build-pangolin = { cmd = "cmake --build Pangolin/build --parallel 6", depends-on = ["configure-pangolin"] }
 build-viewer = { cmd = "CMAKE_ARGS=\"-DCMAKE_PREFIX_PATH=$PIXI_PROJECT_ROOT/Pangolin/build\" python -m pip install --no-build-isolation -e ./DPViewer", depends-on = ["build-pangolin"] }
+configure-dbow2 = { cmd = "cmake -S DBoW2 -B build/dbow2 -DCMAKE_BUILD_TYPE=Release -DBUILD_Demo=OFF -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX" }
+build-dbow2 = { cmd = "cmake --build build/dbow2 --parallel 6", depends-on = ["configure-dbow2"] }
+install-dbow2 = { cmd = "cmake --install build/dbow2", depends-on = ["build-dbow2"] }
+build-retrieval = { cmd = "CMAKE_ARGS=\"-DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4\" python -m pip install --no-build-isolation -e ./DPRetrieval", depends-on = ["install-dbow2"] }
+verify-classic = { cmd = "python -c \"import dpretrieval; print('DPRetrieval', dpretrieval.__version__, 'OK')\"", depends-on = ["build-retrieval"] }
+install-teaser = { cmd = "python -m pip install --no-deps 'git+https://github.com/MIT-SPARK/TEASER-plusplus.git@52a9c52ee7d4c838c5e8a75458c33178be5bfb70'" }
+verify-teaser = { cmd = "python -c \"import teaserpp_python; print('TEASER++ Python: OK')\"", depends-on = ["install-teaser"] }
+verify-multi-robot = { cmd = "python -m unittest tests.test_distributed_loop_closure tests.test_centralized_pgo -v", depends-on = ["verify-classic", "verify-teaser"] }

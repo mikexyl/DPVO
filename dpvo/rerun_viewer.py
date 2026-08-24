@@ -44,6 +44,8 @@ class RerunViewer:
         width,
         save_path=None,
         connect_url=None,
+        recording_id=None,
+        entity_prefix=None,
     ):
         self.patch_graph = patch_graph
         self.height = height
@@ -54,16 +56,28 @@ class RerunViewer:
         self.num_frames = 0
         self.num_points = 0
         self.closed = False
-
-        blueprint = rrb.Blueprint(
-            rrb.Horizontal(
-                rrb.Spatial3DView(name="Reconstruction", origin="world"),
-                rrb.Spatial2DView(name="Camera", origin="world/camera/image"),
-                column_shares=[2, 1],
-            ),
-            collapse_panels=True,
+        self.entity_prefix = (entity_prefix or "world").strip("/")
+        self.apply_map_gauge = entity_prefix is not None and hasattr(
+            patch_graph,
+            "session_from_map_",
         )
-        rr.init("DPVO", default_blueprint=blueprint, strict=True)
+
+        blueprint = None
+        if entity_prefix is None:
+            blueprint = rrb.Blueprint(
+                rrb.Horizontal(
+                    rrb.Spatial3DView(name="Reconstruction", origin="world"),
+                    rrb.Spatial2DView(name="Camera", origin="world/camera/image"),
+                    column_shares=[2, 1],
+                ),
+                collapse_panels=True,
+            )
+        rr.init(
+            "DPVO Multi Robot" if recording_id else "DPVO",
+            recording_id=recording_id,
+            default_blueprint=blueprint,
+            strict=True,
+        )
 
         if save_path is not None and connect_url is not None:
             raise ValueError("Rerun save path and connection URL are mutually exclusive")
@@ -77,7 +91,14 @@ class RerunViewer:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             rr.save(save_path)
 
-        rr.log("world", rr.ViewCoordinates.RDF, static=True)
+        rr.log(self.entity_prefix, rr.ViewCoordinates.RDF, static=True)
+
+    def _entity(self, suffix=""):
+        return (
+            f"{self.entity_prefix}/{suffix.lstrip('/')}"
+            if suffix
+            else self.entity_prefix
+        )
 
     def update_image(self, image):
         self.image = image.permute(1, 2, 0).detach().cpu().numpy()
@@ -94,8 +115,17 @@ class RerunViewer:
             return
 
         rr.set_time("frame", sequence=frame_index)
+        if self.apply_map_gauge:
+            gauge = self.patch_graph.session_from_map_
+            rr.log(
+                self.entity_prefix,
+                rr.Transform3D(
+                    translation=gauge[:3, 3],
+                    mat3x3=gauge[:3, :3],
+                ),
+            )
         rr.log(
-            "world/camera/image",
+            self._entity("camera/image"),
             rr.Pinhole(
                 focal_length=self.intrinsics[:2],
                 principal_point=self.intrinsics[2:],
@@ -105,14 +135,14 @@ class RerunViewer:
             ),
         )
         rr.log(
-            "world/camera/image/rgb",
+            self._entity("camera/image/rgb"),
             rr.Image(self.image, color_model="BGR").compress(jpeg_quality=90),
         )
 
         if self.num_frames > 0:
             poses = _invert_poses(self.patch_graph.poses_[: self.num_frames])
             rr.log(
-                "world/trajectory",
+                self._entity("trajectory"),
                 rr.LineStrips3D(
                     [poses[:, :3]],
                     colors=[0, 170, 255],
@@ -120,7 +150,7 @@ class RerunViewer:
                 ),
             )
             rr.log(
-                "world/camera",
+                self._entity("camera"),
                 rr.Transform3D(
                     translation=poses[-1, :3],
                     mat3x3=_quaternion_to_matrix(poses[-1, 3:]),
@@ -139,7 +169,7 @@ class RerunViewer:
                 np.linalg.norm(points, axis=1) > 1e-8
             )
             rr.log(
-                "world/points",
+                self._entity("points"),
                 rr.Points3D(
                     points[valid],
                     colors=colors[valid],

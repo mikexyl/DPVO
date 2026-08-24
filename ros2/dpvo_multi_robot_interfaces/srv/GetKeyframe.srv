@@ -1,0 +1,7 @@
+string robot_id
+string session_id
+uint64 keyframe_id
+---
+bool success
+string error
+dpvo_multi_robot_interfaces/KeyframeData keyframe

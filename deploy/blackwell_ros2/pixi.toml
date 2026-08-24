@@ -1,15 +1,15 @@
 [workspace]
-name = "dpvo-blackwell"
+name = "dpvo-blackwell-ros2"
 version = "0.1.0"
-description = "DPVO inference environment for NVIDIA Blackwell GPUs"
+description = "DPVO + ROS 2 Jazzy environment for NVIDIA Blackwell GPUs"
 channels = ["nvidia", "conda-forge"]
 platforms = [
-  { name = "linux-64-cuda128", platform = "linux-64", cuda = "12.8", glibc = "2.31" },
+  { name = "linux-64-cuda128", platform = "linux-64", cuda = "12.8", glibc = "2.39" },
 ]
 requires-pixi = ">=0.76"
 
 [dependencies]
-python = "3.10.*"
+python = "3.12.*"
 pip = "*"
 setuptools = "*"
 wheel = "*"
@@ -30,7 +30,7 @@ numpy = "1.26.4.*"
 [pypi-dependencies]
 torch = { version = "==2.7.1", index = "https://download.pytorch.org/whl/cu128" }
 torchvision = { version = "==0.22.1", index = "https://download.pytorch.org/whl/cu128" }
-torch-scatter = { url = "https://data.pyg.org/whl/torch-2.7.0%2Bcu128/torch_scatter-2.1.2%2Bpt27cu128-cp310-cp310-linux_x86_64.whl" }
+torch-scatter = { url = "https://data.pyg.org/whl/torch-2.7.0%2Bcu128/torch_scatter-2.1.2%2Bpt27cu128-cp312-cp312-linux_x86_64.whl" }
 tensorboard = "*"
 numba = "*"
 tqdm = "*"
@@ -44,6 +44,7 @@ yacs = "*"
 matplotlib = "*"
 rerun-sdk = "==0.23.1"
 rosbags = "==0.11.5"
+scipy = "*"
 
 [activation.env]
 PYTHONNOUSERSITE = "1"
@@ -55,11 +56,11 @@ PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
 [tasks]
 build = { cmd = "python -m pip install --no-build-isolation -e ../.." }
 verify = { cmd = "python -c \"import torch, torch_scatter, cuda_ba, cuda_corr, lietorch_backends; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'device', torch.cuda.get_device_name()); print('capability', torch.cuda.get_device_capability()); print('DPVO extensions: OK')\"", depends-on = ["build"] }
-configure-dbow2 = { cmd = "cmake -S ../../DBoW2 -B ../../build/dbow2-blackwell -DCMAKE_BUILD_TYPE=Release -DBUILD_Demo=OFF -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX" }
-build-dbow2 = { cmd = "cmake --build ../../build/dbow2-blackwell --parallel 8", depends-on = ["configure-dbow2"] }
-install-dbow2 = { cmd = "cmake --install ../../build/dbow2-blackwell", depends-on = ["build-dbow2"] }
+configure-dbow2 = { cmd = "cmake -S ../../DBoW2 -B ../../build/dbow2-blackwell-ros2 -DCMAKE_BUILD_TYPE=Release -DBUILD_Demo=OFF -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX" }
+build-dbow2 = { cmd = "cmake --build ../../build/dbow2-blackwell-ros2 --parallel 8", depends-on = ["configure-dbow2"] }
+install-dbow2 = { cmd = "cmake --install ../../build/dbow2-blackwell-ros2", depends-on = ["build-dbow2"] }
 build-retrieval = { cmd = "CMAKE_ARGS=\"-DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4\" python -m pip install --no-build-isolation -e ../../DPRetrieval", depends-on = ["install-dbow2"] }
 verify-classic = { cmd = "python -c \"import dpretrieval; print('DPRetrieval', dpretrieval.__version__, 'OK')\"", depends-on = ["build-retrieval"] }
 install-teaser = { cmd = "python -m pip install --no-deps 'git+https://github.com/MIT-SPARK/TEASER-plusplus.git@52a9c52ee7d4c838c5e8a75458c33178be5bfb70'" }
 verify-teaser = { cmd = "python -c \"import teaserpp_python; print('TEASER++ Python: OK')\"", depends-on = ["install-teaser"] }
-verify-multi-robot = { cmd = "python -m unittest tests.test_distributed_loop_closure -v", depends-on = ["verify-classic", "verify-teaser"] }
+verify-multi-robot = { cmd = "cd ../.. && python -m unittest tests.test_distributed_loop_closure tests.test_centralized_pgo -v", depends-on = ["verify", "verify-classic", "verify-teaser"] }

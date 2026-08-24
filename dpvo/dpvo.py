@@ -29,8 +29,12 @@ class DPVO:
         viewer=None,
         viewer_output=None,
         viewer_connect=None,
+        viewer_recording_id=None,
+        viewer_entity_prefix=None,
+        long_term_lc_factory=None,
     ):
         self.cfg = cfg
+        self.long_term_lc_factory = long_term_lc_factory
         self.load_weights(network)
         self.is_initialized = False
         self.enable_timing = False
@@ -88,12 +92,22 @@ class DPVO:
         self.viewer = None
         viewer = viewer or ("pangolin" if viz else None)
         if viewer is not None:
-            self.start_viewer(viewer, viewer_output, viewer_connect)
+            self.start_viewer(
+                viewer,
+                viewer_output,
+                viewer_connect,
+                viewer_recording_id,
+                viewer_entity_prefix,
+            )
 
     def load_long_term_loop_closure(self):
         try:
-            from .loop_closure.long_term import LongTermLoopClosure
-            self.long_term_lc = LongTermLoopClosure(self.cfg, self.pg)
+            if self.long_term_lc_factory is None:
+                from .loop_closure.long_term import LongTermLoopClosure
+
+                self.long_term_lc = LongTermLoopClosure(self.cfg, self.pg)
+            else:
+                self.long_term_lc = self.long_term_lc_factory(self.cfg, self.pg)
         except ModuleNotFoundError as e:
             self.cfg.CLASSIC_LOOP_CLOSURE = False
             print(f"WARNING: {e}")
@@ -127,6 +141,8 @@ class DPVO:
         viewer="pangolin",
         viewer_output=None,
         viewer_connect=None,
+        viewer_recording_id=None,
+        viewer_entity_prefix=None,
     ):
         if viewer == "pangolin":
             from dpviewer import Viewer
@@ -148,6 +164,8 @@ class DPVO:
                 width=self.wd,
                 save_path=viewer_output,
                 connect_url=viewer_connect,
+                recording_id=viewer_recording_id,
+                entity_prefix=viewer_entity_prefix,
             )
         else:
             raise ValueError(f"Unknown viewer: {viewer}")
@@ -203,15 +221,15 @@ class DPVO:
         t0, dP = self.pg.delta[t]
         return dP * self.get_pose(t0)
 
-    def terminate(self):
+    def terminate(self, final_updates=12):
 
         if self.cfg.CLASSIC_LOOP_CLOSURE:
             self.long_term_lc.terminate(self.n)
 
-        if self.cfg.LOOP_CLOSURE:
+        if self.cfg.LOOP_CLOSURE and final_updates > 0:
             self.append_factors(*self.pg.edges_loop())
 
-        for _ in range(12):
+        for _ in range(final_updates):
             self.ran_global_ba[self.n] = False
             self.update()
 

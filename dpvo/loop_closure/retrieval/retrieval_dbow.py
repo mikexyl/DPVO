@@ -1,6 +1,8 @@
 import os
-import time
-from multiprocessing import Process, Queue, Value
+from multiprocessing import Event as ProcessEvent
+from multiprocessing import Process, Queue as ProcessQueue
+from queue import Queue as ThreadQueue
+from threading import Event as ThreadEvent, Thread
 import numpy as np
 from einops import parse_shape
 
@@ -18,16 +20,23 @@ RAD = 50
 def _dbow_loop(in_queue, out_queue, vocab_path, ready):
     """ Run DBoW retrieval """
     dbow = dpretrieval.DPRetrieval(vocab_path, 50)
-    ready.value = 1
+    ready.set()
     while True:
-        n, image = in_queue.get()
-        dbow.insert_image(image)
+        item = in_queue.get()
+        if item is None:
+            return
+        n, image = item
+        bow = dbow.insert_image(image)
+        if bow is None:
+            raise RuntimeError(
+                "The dpretrieval extension is stale; rebuild it to enable BoW export"
+            )
         q = dbow.query(n)
-        out_queue.put((n, q))
+        out_queue.put((n, q, bow))
 
 class RetrievalDBOW:
 
-    def __init__(self, vocab_path="ORBvoc.txt"):
+    def __init__(self, vocab_path="ORBvoc.txt", bow_callback=None, use_threads=False):
         if not os.path.exists(vocab_path):
             raise FileNotFoundError("""Missing the ORB vocabulary. Please download and un-tar it from """
                                   """https://github.com/UZ-SLAMLab/ORB_SLAM3/blob/master/Vocabulary/ORBvoc.txt.tar.gz"""
@@ -40,16 +49,25 @@ class RetrievalDBOW:
         # Keep track of detected and closed loops
         self.prev_loop_closes = []
         self.found = []
+        self.bow_callback = bow_callback
 
-        # Run DBoW in a separate process
-        self.in_queue = Queue(maxsize=20)
-        self.out_queue = Queue(maxsize=20)
-        ready = Value('i', 0)
-        self.proc = Process(target=_dbow_loop, args=(self.in_queue, self.out_queue, vocab_path, ready))
+        # Threads avoid a second CUDA context when the parent was launched via
+        # ROS. Standalone DPVO retains the original process isolation.
+        self.use_threads = use_threads
+        queue_type = ThreadQueue if use_threads else ProcessQueue
+        event_type = ThreadEvent if use_threads else ProcessEvent
+        worker_type = Thread if use_threads else Process
+        self.in_queue = queue_type(maxsize=20)
+        self.out_queue = queue_type(maxsize=20)
+        ready = event_type()
+        self.proc = worker_type(
+            target=_dbow_loop,
+            args=(self.in_queue, self.out_queue, vocab_path, ready),
+            daemon=True,
+        )
         self.proc.start()
         self.being_processed = 0
-        while not ready.value:
-            time.sleep(0.01)
+        ready.wait()
 
     def keyframe(self, k):
         """ Once we keyframe an image, we can safely cache all images
@@ -96,8 +114,10 @@ class RetrievalDBOW:
     def _detect_loop(self, thresh, num_repeat=1):
         """ Pop retrived pairs off the queue. Return if they have non-trivial score """
         assert self.being_processed > 0
-        i, (score, j, _) = self.out_queue.get()
+        i, (score, j, _), bow = self.out_queue.get()
         self.being_processed -= 1
+        if self.bow_callback is not None:
+            self.bow_callback(i, bow)
         if score < thresh:
             return
         assert i > j
@@ -121,5 +141,8 @@ class RetrievalDBOW:
         self.image_buffer[n] = image
     
     def close(self):
-        self.proc.terminate()
+        if self.use_threads:
+            self.in_queue.put(None)
+        else:
+            self.proc.terminate()
         self.proc.join()

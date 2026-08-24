@@ -5,6 +5,7 @@ from einops import asnumpy, reduce, repeat
 from . import projective_ops as pops
 from .lietorch import SE3
 from .loop_closure.optim_utils import reduce_edges
+from .map_gauge import normalization_change
 from .utils import *
 
 
@@ -33,6 +34,10 @@ class PatchGraph:
 
         self.index_ = torch.zeros(self.N, self.M, dtype=torch.long, device="cuda")
         self.index_map_ = torch.zeros(self.N, dtype=torch.long, device="cuda")
+
+        # Similarity mapping the mutable internal map gauge into a stable
+        # per-session map frame used by ROS and distributed loop closure.
+        self.session_from_map_ = np.eye(4, dtype=np.float64)
 
         # initialize poses to identity matrix
         self.poses_[:,6] = 1.0
@@ -84,6 +89,19 @@ class PatchGraph:
     def normalize(self):
         """ normalize depth and poses """
         s = self.patches_[:self.n,:,2].mean()
+        camera_to_map = (
+            SE3(self.poses_[[0]])
+            .inv()
+            .matrix()[0]
+            .detach()
+            .double()
+            .cpu()
+            .numpy()
+        )
+        self.session_from_map_ = self.session_from_map_ @ normalization_change(
+            camera_to_map,
+            float(s),
+        )
         self.patches_[:self.n,:,2] /= s
         self.poses_[:self.n,:3] *= s
         for t, (t0, dP) in self.delta.items():

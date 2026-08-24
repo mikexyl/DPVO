@@ -1,0 +1,31 @@
+/**:
+  ros__parameters:
+    robot_id: robot0
+    session_id: ""
+    network: dpvo.pth
+    config: config/fast.yaml
+    orb_vocab: ORBvoc.txt
+    vocabulary_id: ""
+    image_topic: /camera/image_raw
+    camera_info_topic: /camera/camera_info
+    image_scale: 1.0
+    viewer: none
+    rerun_save: ""
+    rerun_connect: ""
+    rerun_recording_id: ""
+    rerun_entity_prefix: ""
+    enable_dpvo_loop_closure: true
+    bow_threshold: 0.04
+    bow_repetitions: 3
+    bow_nms_radius: 50
+    teaser_noise_bound: 0.10
+    teaser_required: false
+    min_inliers: 30
+    min_inlier_ratio: 0.20
+    bow_topic: /dpvo_multi_robot/bow
+    constraint_topic: /dpvo_multi_robot/loop_closure
+    service_prefix: /dpvo_multi_robot
+    pose_topic: dpvo/pose
+    path_topic: dpvo/path
+    frame_ack_topic: dpvo/frame_ack
+    map_frame: map

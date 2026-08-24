@@ -1,5 +1,6 @@
 import os
 from multiprocessing import Pool
+from multiprocessing.pool import ThreadPool
 from shutil import copytree
 from tempfile import TemporaryDirectory
 
@@ -14,11 +15,12 @@ BLANK = np.zeros((500,500,3), dtype=np.uint8)
 
 class ImageCache:
 
-    def __init__(self):
+    def __init__(self, use_threads=False):
         self.image_buffer = {}
         self.tmpdir = TemporaryDirectory()
         self.stored_indices = np.zeros(100000, dtype=bool)
-        self.writer_pool = Pool(processes=1)
+        pool_type = ThreadPool if use_threads else Pool
+        self.writer_pool = pool_type(processes=1)
         self.write_result = self.writer_pool.apply_async(cv2.imwrite, [f"{self.tmpdir.name}/warmup.png", BLANK, JPEG_QUALITY])
         self._wait()
 
@@ -42,11 +44,12 @@ class ImageCache:
 
     def load_frames(self, idxs, device='cuda'):
         self._wait()
-        assert np.all(self.stored_indices[idxs])
+        if not np.all(self.stored_indices[idxs]):
+            raise KeyError(f"image triplet is not stable yet: {idxs}")
         frame_list = [f"{self.tmpdir.name}/{i:08d}{IMEXT}" for i in idxs]
         assert all(map(os.path.exists, frame_list))
         image_list = [cv2.imread(f) for f in frame_list]
-        return K.utils.image_list_to_tensor(image_list).to(device=device)
+        return K.image.image_list_to_tensor(image_list).to(device=device)
 
     def keyframe(self, k):
         tmp = dict(self.image_buffer)
@@ -70,3 +73,4 @@ class ImageCache:
         self.tmpdir.cleanup()
         # os.rename('/tmp/temp', self.tmpdir.name)
         self.writer_pool.close()
+        self.writer_pool.join()

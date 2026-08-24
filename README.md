@@ -160,6 +160,14 @@ If installed, the classical backend can also be enabled using
 --opts CLASSIC_LOOP_CLOSURE True
 ```
 
+## Multi-robot ROS 2 frontend
+
+The ROS 2 Humble frontend exchanges sparse DBoW2 vectors first, requests full
+keyframe geometry and DISK descriptors only after a repeated BoW match, verifies
+cross-robot correspondences with LightGlue and TEASER++, and publishes typed
+inter-robot Sim(3) constraints. See [ros2/README.md](ros2/README.md) for the
+architecture, build, and launch commands.
+
 ## Evaluation
 We provide evaluation scripts for TartanAir, EuRoC, TUM-RGBD and ICL-NUIM. Up to date result logs on these datasets can be found in the `logs` directory.
 

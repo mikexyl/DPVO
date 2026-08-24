@@ -1,4 +1,6 @@
 import os
+from multiprocessing.pool import ThreadPool
+from queue import Queue
 
 import kornia as K
 import kornia.feature as KF
@@ -19,18 +21,30 @@ from .retrieval import ImageCache, RetrievalDBOW
 
 class LongTermLoopClosure:
 
-    def __init__(self, cfg, patchgraph):
+    def __init__(self, cfg, patchgraph, bow_callback=None):
         self.cfg = cfg
 
         # Data structures to manage retrieval
-        self.retrieval = RetrievalDBOW(self.cfg.ORB_VOCAB_PATH)
-        self.imcache = ImageCache()
+        self.retrieval = RetrievalDBOW(
+            self.cfg.ORB_VOCAB_PATH,
+            bow_callback=bow_callback,
+            use_threads=self.cfg.CLASSIC_PGO_USE_THREADS,
+        )
+        self.imcache = ImageCache(
+            use_threads=self.cfg.CLASSIC_PGO_USE_THREADS,
+        )
 
-        # Process to run PGO in parallel
-        self.lc_pool = mp.Pool(processes=1)
+        # ROS multi-robot deployment uses a thread so three DPVO parents do not
+        # each recursively spawn CUDA-initializing worker processes. The
+        # original process backend remains the default for standalone DPVO.
+        if self.cfg.CLASSIC_PGO_USE_THREADS:
+            self.lc_pool = ThreadPool(processes=1)
+            self.result_queue = Queue()
+        else:
+            self.lc_pool = mp.Pool(processes=1)
+            self.manager = mp.Manager()
+            self.result_queue = self.manager.Queue()
         self.lc_process = self.lc_pool.apply_async(os.getpid)
-        self.manager = mp.Manager()
-        self.result_queue = self.manager.Queue()
         self.lc_in_progress = False
 
         # Patch graph + loop edges
@@ -59,7 +73,7 @@ class LongTermLoopClosure:
 
 
     def __call__(self, img, n):
-        img_np = K.tensor_to_image(img)
+        img_np = K.image.tensor_to_image(img)
         self.retrieval(img_np, n)
         self.imcache(img_np, n)
 
@@ -141,6 +155,12 @@ class LongTermLoopClosure:
         if self.lc_in_progress:
             return
 
+        # Make the image triplets requestable before their BoW vectors can be
+        # published by detect_loop(). This ordering matters when a remote ROS
+        # peer immediately requests a matching detailed keyframe.
+        self.retrieval.save_up_to(n - self.cfg.REMOVAL_WINDOW - 2)
+        self.imcache.save_up_to(n - self.cfg.REMOVAL_WINDOW - 1)
+
         """ Check if a loop was detected """
         cands = self.retrieval.detect_loop(thresh=self.cfg.LOOP_RETR_THRESH, num_repeat=self.cfg.LOOP_CLOSE_WINDOW_SIZE)
         if cands is not None:
@@ -154,10 +174,6 @@ class LongTermLoopClosure:
             if lc_result:
                 self.retrieval.confirm_loop(i, j)
             self.retrieval.found.clear()
-
-        """ "Flush" the queue of frames into the loop-closure pipeline """
-        self.retrieval.save_up_to(n - self.cfg.REMOVAL_WINDOW - 2)
-        self.imcache.save_up_to(n - self.cfg.REMOVAL_WINDOW - 1)
 
     def terminate(self, n):
         self.retrieval.save_up_to(n-1)

@@ -10,6 +10,7 @@
 #include <pybind11/stl.h>
 #include "DBoW2.h" // defines OrbVocabulary and OrbDatabase
 #include <pybind11/numpy.h>
+#include <cstdint>
 
 using namespace DBoW2;
 namespace py = pybind11;
@@ -35,12 +36,23 @@ void estimateAffine3D(const py::array_t<uint8_t> &pointsA, const py::array_t<uin
 }
 
 typedef std::vector<std::tuple<double, double, double, double, double>> MatchList;
+typedef std::vector<std::pair<std::uint32_t, double>> BowList;
+
+BowList bowToList(const BowVector &bow) {
+  BowList output;
+  output.reserve(bow.size());
+  for (const auto &entry : bow) {
+    output.emplace_back(static_cast<std::uint32_t>(entry.first), entry.second);
+  }
+  return output;
+}
 
 class DPRetrieval {       // The class
   private:
     std::vector<std::vector<cv::Mat > > features;
     std::vector<cv::Mat > descs;
     std::vector<std::vector<cv::KeyPoint > > kps;
+    OrbVocabulary voc;
     OrbDatabase db;
     const int rad;
 
@@ -51,7 +63,6 @@ class DPRetrieval {       // The class
       std::cout << "Loading the vocabulary " << vocab_path << std::endl;
 
       // load the vocabulary from disk
-      OrbVocabulary voc;
       voc.loadFromTextFile(vocab_path);
 
       db = OrbDatabase(voc, false, 0); // false = do not use direct index
@@ -62,7 +73,7 @@ class DPRetrieval {       // The class
 
     }
 
-    void insert_image(const py::array_t<uint8_t> &array){
+    BowList insert_image(const py::array_t<uint8_t> &array){
 
         const py::buffer_info buf = array.request();
         if ((buf.shape.size() != 3) || buf.shape[2] != 3)
@@ -87,7 +98,9 @@ class DPRetrieval {       // The class
         features.push_back(feats);
         descs.push_back(descriptors);
 
-        db.add(features.back());
+        BowVector bow;
+        db.add(features.back(), &bow);
+        return bowToList(bow);
 
     }
 
