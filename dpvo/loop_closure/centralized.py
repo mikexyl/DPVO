@@ -80,6 +80,12 @@ class RobotMapConstraint:
     match_pose: Sim3
     query_to_match: Sim3
     weight: float = 1.0
+    query_keyframe_id: Optional[int] = None
+    match_keyframe_id: Optional[int] = None
+    bow_score: Optional[float] = None
+    inliers: Optional[int] = None
+    inlier_ratio: Optional[float] = None
+    verification_method: Optional[str] = None
 
     def map_measurement(self):
         """Return the measured query-map to match-map Sim(3)."""
@@ -104,6 +110,28 @@ class CentralizedRobotMapPGO:
 
     def __init__(self, anchor: Optional[RobotKey] = None):
         self.anchor = anchor
+
+    def initialize(self, constraints: Iterable[RobotMapConstraint]):
+        """Return deterministic initial transforms and fixed component anchors."""
+
+        constraints = list(constraints)
+        robots = sorted(
+            {
+                robot
+                for constraint in constraints
+                for robot in (constraint.query_robot, constraint.match_robot)
+            }
+        )
+        if not robots:
+            return {}, set()
+
+        components = self._components(robots, constraints)
+        anchors = {min(component) for component in components}
+        if self.anchor in robots:
+            component = next(x for x in components if self.anchor in x)
+            anchors.discard(min(component))
+            anchors.add(self.anchor)
+        return self._initial_estimate(robots, constraints, anchors), anchors
 
     @staticmethod
     def _components(robots, constraints):
@@ -163,14 +191,7 @@ class CentralizedRobotMapPGO:
         if not robots:
             return CentralizedPgoResult({}, True, 0.0, 0.0)
 
-        components = self._components(robots, constraints)
-        anchors = {min(component) for component in components}
-        if self.anchor in robots:
-            component = next(x for x in components if self.anchor in x)
-            anchors.discard(min(component))
-            anchors.add(self.anchor)
-
-        estimates = self._initial_estimate(robots, constraints, anchors)
+        estimates, anchors = self.initialize(constraints)
         variables = [robot for robot in robots if robot not in anchors]
         if not variables:
             return CentralizedPgoResult(estimates, True, 0.0, 0.0)

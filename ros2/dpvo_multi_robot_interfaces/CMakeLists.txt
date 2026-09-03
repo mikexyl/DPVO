@@ -8,6 +8,7 @@ find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BowVector.msg"
+  "msg/GlobalDescriptor.msg"
   "msg/InterRobotLoopClosure.msg"
   "msg/KeyframeData.msg"
   "msg/RobotMapTransform.msg"

@@ -57,11 +57,37 @@ class LongTermLoopClosure:
         # warmup the jit compiler
         ransac_umeyama(np.random.randn(3,3), np.random.randn(3,3), iterations=200, threshold=0.01)
 
-        self.detector = KF.DISK.from_pretrained("depth").to("cuda").eval()
-        self.matcher = KF.LightGlue("disk").to("cuda").eval()
+        self.local_feature_backend = self.cfg.MULTI_ROBOT_LOCAL_FEATURE_BACKEND.lower()
+        if self.local_feature_backend == "xfeat":
+            from .learned_frontend import XFeatFrontend
+
+            self.local_frontend = XFeatFrontend(
+                repo_or_dir=self.cfg.MULTI_ROBOT_XFEAT_REPO,
+                top_k=self.cfg.MULTI_ROBOT_XFEAT_TOP_K,
+                detection_threshold=(
+                    self.cfg.MULTI_ROBOT_XFEAT_DETECTION_THRESHOLD
+                ),
+                min_confidence=(
+                    self.cfg.MULTI_ROBOT_LIGHTGLUE_MIN_CONFIDENCE
+                ),
+            )
+            self.detector = self.local_frontend.model
+            self.matcher = self.local_frontend.matcher
+        elif self.local_feature_backend == "disk":
+            self.local_frontend = None
+            self.detector = KF.DISK.from_pretrained("depth").to("cuda").eval()
+            self.matcher = KF.LightGlue("disk").to("cuda").eval()
+        else:
+            raise ValueError(
+                "MULTI_ROBOT_LOCAL_FEATURE_BACKEND must be 'disk' or 'xfeat', "
+                f"got {self.local_feature_backend!r}"
+            )
 
     def detect_keypoints(self, images, num_features=2048):
-        """ Pretty self explanitory! Alas, we can only use disk w/ lightglue. ORB is brittle """
+        """Detect local features with the configured learned front end."""
+        if self.local_frontend is not None:
+            return self.local_frontend.detect(images)
+
         _, _, h, w = images.shape
         wh = torch.tensor([w, h]).view(1, 2).float().cuda()
         features = self.detector(images, num_features, pad_if_not_divisible=True, window_size=15, score_threshold=40.0)
@@ -73,7 +99,14 @@ class LongTermLoopClosure:
 
 
     def __call__(self, img, n):
-        img_np = K.image.tensor_to_image(img)
+        # Kornia 0.8 moved these helpers out of the removed ``kornia.image``
+        # namespace. Keep compatibility with both the deployment environment
+        # and newer local environments used for offline reconstruction.
+        image_module = getattr(K, "image", None)
+        tensor_to_image = getattr(image_module, "tensor_to_image", None)
+        if tensor_to_image is None:
+            tensor_to_image = K.tensor_to_image
+        img_np = tensor_to_image(img)
         self.retrieval(img_np, n)
         self.imcache(img_np, n)
 
@@ -90,8 +123,16 @@ class LongTermLoopClosure:
         fl = self.detect_keypoints(image)
 
         """ Form keypoint trajectories """
-        trajectories = torch.full((2048, 3), -1, device='cuda', dtype=torch.long)
-        trajectories[:,1] = torch.arange(2048)
+        center_feature_count = fl[1]["keypoints"].shape[1]
+        if center_feature_count == 0:
+            raise RuntimeError("local feature detector returned no center-frame features")
+        trajectories = torch.full(
+            (center_feature_count, 3),
+            -1,
+            device="cuda",
+            dtype=torch.long,
+        )
+        trajectories[:,1] = torch.arange(center_feature_count, device="cuda")
 
         out = self.matcher({"image0": fl[0], "image1": fl[1]})
         i0, i1 = out["matches"][0].mT
@@ -101,7 +142,9 @@ class LongTermLoopClosure:
         i2, i1 = out["matches"][0].mT
         trajectories[i1, 2] = i2
 
-        trajectories = trajectories[torch.randperm(2048)]
+        trajectories = trajectories[
+            torch.randperm(center_feature_count, device="cuda")
+        ]
         trajectories = trajectories[trajectories.min(dim=1).values >= 0]
 
         a,b,c = trajectories.mT

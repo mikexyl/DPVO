@@ -50,5 +50,29 @@ def centralized_pgo_main():
     _exec_module("dpvo_multi_robot.centralized_pgo")
 
 
+def cbs_pgo_main():
+    _exec_module("dpvo_multi_robot.cbs_pgo")
+
+
 def euroc_player_main():
     _exec_module("dpvo_multi_robot.euroc_player")
+
+
+def tum_player_main():
+    _exec_module("dpvo_multi_robot.tum_player")
+
+
+def kitti_player_main():
+    _exec_module("dpvo_multi_robot.kitti_player")
+
+
+def newer_college_player_main():
+    _exec_module("dpvo_multi_robot.newer_college_player")
+
+
+def cu_multi_player_main():
+    _exec_module("dpvo_multi_robot.cu_multi_player")
+
+
+def s3e_player_main():
+    _exec_module("dpvo_multi_robot.s3e_player")

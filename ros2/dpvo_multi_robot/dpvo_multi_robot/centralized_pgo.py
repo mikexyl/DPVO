@@ -15,9 +15,17 @@ from rclpy.node import Node
 from scipy.spatial.transform import Rotation
 
 from dpvo.loop_closure.centralized import (
+    CentralizedPgoResult,
     CentralizedRobotMapPGO,
     RobotMapConstraint,
     Sim3,
+)
+from dpvo.loop_closure.pose_graph import (
+    build_keyframe_graph,
+    build_map_graph,
+    split_keyframe_graph_by_robot,
+    write_g2o,
+    write_json,
 )
 from dpvo_multi_robot_interfaces.msg import (
     InterRobotLoopClosure,
@@ -56,6 +64,9 @@ class CentralizedPgoNode(Node):
         self.declare_parameter("global_path_topic_suffix", "dpvo/global_path")
         self.declare_parameter("global_frame", "world")
         self.declare_parameter("output_path", "")
+        self.declare_parameter("pose_graph_output", "")
+        self.declare_parameter("pose_graph_export_period", 0.0)
+        self.declare_parameter("pose_graph_odometry_weight", 100.0)
         self.declare_parameter("rerun_connect", "")
         self.declare_parameter("rerun_recording_id", "")
 
@@ -71,6 +82,8 @@ class CentralizedPgoNode(Node):
         self.rerun_enabled = False
         self.rerun_update = 0
         self.rerun_frame = 0
+        self.last_result = CentralizedPgoResult({}, True, 0.0, 0.0)
+        self.last_pose_graph_signature = None
 
         self._start_rerun()
 
@@ -104,6 +117,34 @@ class CentralizedPgoNode(Node):
                 f"/{robot_id}/{global_suffix}",
                 10,
             )
+
+        self.pose_graph_base = self._pose_graph_base()
+        self.pose_graph_timer = None
+        if self.pose_graph_base is not None:
+            period = float(self.get_parameter("pose_graph_export_period").value)
+            if period > 0.0:
+                self.pose_graph_timer = self.create_timer(
+                    max(period, 0.1), self.save_pose_graph
+                )
+                schedule = f"every {max(period, 0.1):g} seconds and at shutdown"
+            else:
+                schedule = "at shutdown"
+            self.get_logger().info(
+                "Pose-graph export enabled %s: %s_{map,keyframes}"
+                % (schedule, self.pose_graph_base)
+            )
+
+    def _pose_graph_base(self):
+        explicit = self.get_parameter("pose_graph_output").value
+        if explicit:
+            path = Path(explicit).expanduser()
+            return path.with_suffix("") if path.suffix else path
+        output_path = self.get_parameter("output_path").value
+        if not output_path:
+            return None
+        path = Path(output_path).expanduser()
+        path = path.with_suffix("") if path.suffix else path
+        return path.with_name(f"{path.name}_pose_graph")
 
     def _start_rerun(self):
         connect_url = self.get_parameter("rerun_connect").value
@@ -216,6 +257,12 @@ class CentralizedPgoNode(Node):
                         message.scale,
                     ),
                     weight=weight,
+                    query_keyframe_id=int(message.query_keyframe_id),
+                    match_keyframe_id=int(message.match_keyframe_id),
+                    bow_score=float(message.bow_score),
+                    inliers=int(message.inliers),
+                    inlier_ratio=float(message.inlier_ratio),
+                    verification_method=message.verification_method,
                 )
             )
             anchor_id = self.get_parameter("anchor_robot_id").value
@@ -229,6 +276,7 @@ class CentralizedPgoNode(Node):
                 None,
             )
             result = CentralizedRobotMapPGO(anchor=anchor).solve(self.constraints)
+            self.last_result = result
             self.transforms = result.transforms
             self._publish_transforms(result)
             self._log_rerun_result(result)
@@ -361,7 +409,8 @@ class CentralizedPgoNode(Node):
         alignment_rotation = Rotation.from_matrix(transform.rotation)
         for source_pose in source.poses:
             pose = PoseStamped()
-            pose.header = output.header
+            pose.header.stamp = source_pose.header.stamp
+            pose.header.frame_id = output.header.frame_id
             local_position = np.array(
                 [
                     source_pose.pose.position.x,
@@ -411,6 +460,131 @@ class CentralizedPgoNode(Node):
             rr.disconnect()
             self.rerun_enabled = False
 
+    @staticmethod
+    def _path_poses(path):
+        return [
+            Sim3(
+                [
+                    pose.pose.position.x,
+                    pose.pose.position.y,
+                    pose.pose.position.z,
+                ],
+                Rotation.from_quat(
+                    [
+                        pose.pose.orientation.x,
+                        pose.pose.orientation.y,
+                        pose.pose.orientation.z,
+                        pose.pose.orientation.w,
+                    ]
+                ).as_matrix(),
+                1.0,
+            )
+            for pose in path.poses
+        ]
+
+    @staticmethod
+    def _path_timestamps(path):
+        return [
+            pose.header.stamp.sec + pose.header.stamp.nanosec * 1e-9
+            for pose in path.poses
+        ]
+
+    def save_pose_graph(self, force=False):
+        if self.pose_graph_base is None:
+            return
+        with self.lock:
+            signature = (
+                len(self.constraints),
+                tuple(sorted((robot, len(path.poses)) for robot, path in self.paths.items())),
+                tuple(sorted(self.sessions_by_robot.items())),
+            )
+            if not force and signature == self.last_pose_graph_signature:
+                return
+            try:
+                anchor_id = self.get_parameter("anchor_robot_id").value
+                anchor = next(
+                    (
+                        robot
+                        for robot in self.last_result.transforms
+                        if robot[0] == anchor_id
+                    ),
+                    None,
+                )
+                map_graph = build_map_graph(
+                    self.constraints,
+                    self.last_result,
+                    anchor=anchor,
+                )
+                keyframe_graph = build_keyframe_graph(
+                    self.constraints,
+                    self.last_result,
+                    {
+                        robot: self._path_poses(path)
+                        for robot, path in self.paths.items()
+                    },
+                    self.sessions_by_robot,
+                    anchor_id,
+                    odometry_weight=float(
+                        self.get_parameter("pose_graph_odometry_weight").value
+                    ),
+                    timestamps={
+                        robot: self._path_timestamps(path)
+                        for robot, path in self.paths.items()
+                    },
+                )
+                unoptimized_graph = build_keyframe_graph(
+                    self.constraints,
+                    self.last_result,
+                    {
+                        robot: self._path_poses(path)
+                        for robot, path in self.paths.items()
+                    },
+                    self.sessions_by_robot,
+                    anchor_id,
+                    odometry_weight=float(
+                        self.get_parameter("pose_graph_odometry_weight").value
+                    ),
+                    align_to_global=False,
+                    timestamps={
+                        robot: self._path_timestamps(path)
+                        for robot, path in self.paths.items()
+                    },
+                )
+                map_json = Path(f"{self.pose_graph_base}_map.json")
+                keyframe_json = Path(f"{self.pose_graph_base}_keyframes.json")
+                unoptimized_json = Path(
+                    f"{self.pose_graph_base}_keyframes_unoptimized.json"
+                )
+                write_json(map_graph, map_json)
+                write_g2o(map_graph, map_json.with_suffix(".g2o"))
+                write_json(keyframe_graph, keyframe_json)
+                write_g2o(keyframe_graph, keyframe_json.with_suffix(".g2o"))
+                write_json(unoptimized_graph, unoptimized_json)
+                write_g2o(
+                    unoptimized_graph,
+                    unoptimized_json.with_suffix(".g2o"),
+                )
+                for robot_id, robot_graph in split_keyframe_graph_by_robot(
+                    unoptimized_graph
+                ).items():
+                    robot_json = Path(f"{self.pose_graph_base}_{robot_id}.json")
+                    write_json(robot_graph, robot_json)
+                    write_g2o(robot_graph, robot_json.with_suffix(".g2o"))
+                self.last_pose_graph_signature = signature
+                if rclpy.ok():
+                    self.get_logger().info(
+                        "Pose graphs: map %dV/%dE, keyframes %dV/%dE"
+                        % (
+                            len(map_graph.vertices),
+                            len(map_graph.edges),
+                            len(keyframe_graph.vertices),
+                            len(keyframe_graph.edges),
+                        )
+                    )
+            except Exception as error:
+                if rclpy.ok():
+                    self.get_logger().error(f"Pose-graph export failed: {error}")
+
     def _save(self, result):
         output_path = self.get_parameter("output_path").value
         if not output_path:
@@ -429,6 +603,12 @@ class CentralizedPgoNode(Node):
                     "match_session": constraint.match_robot[1],
                     "measurement_scale": constraint.query_to_match.scale,
                     "weight": constraint.weight,
+                    "query_keyframe_id": constraint.query_keyframe_id,
+                    "match_keyframe_id": constraint.match_keyframe_id,
+                    "bow_score": constraint.bow_score,
+                    "inliers": constraint.inliers,
+                    "inlier_ratio": constraint.inlier_ratio,
+                    "verification_method": constraint.verification_method,
                 }
                 for constraint in self.constraints
             ],
@@ -454,6 +634,7 @@ def main(args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        node.save_pose_graph(force=True)
         node.close_rerun()
         node.destroy_node()
         if rclpy.ok():

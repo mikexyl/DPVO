@@ -58,7 +58,12 @@ class RetrievalDBOW:
         event_type = ThreadEvent if use_threads else ProcessEvent
         worker_type = Thread if use_threads else Process
         self.in_queue = queue_type(maxsize=20)
-        self.out_queue = queue_type(maxsize=20)
+        # The producer flushes all remaining images before detect_loop() drains
+        # results during shutdown. If both queues are bounded, the producer can
+        # block on a full input queue while the DBoW worker blocks on a full
+        # output queue. Keep the result queue unbounded so finalization cannot
+        # deadlock; normal online processing still drains it continuously.
+        self.out_queue = queue_type()
         ready = event_type()
         self.proc = worker_type(
             target=_dbow_loop,

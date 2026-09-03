@@ -4,18 +4,23 @@ import re
 import threading
 
 import numpy as np
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import (
+    MutuallyExclusiveCallbackGroup,
+    ReentrantCallbackGroup,
+)
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from dpvo.loop_closure.distributed import (
     BowMatch,
     FrameIdentity,
+    GlobalDescriptor,
     InterRobotConstraint,
     KeyframePayload,
     SparseBow,
 )
 from dpvo_multi_robot_interfaces.msg import (
     BowVector,
+    GlobalDescriptor as GlobalDescriptorMessage,
     InterRobotLoopClosure,
     KeyframeData,
 )
@@ -40,6 +45,7 @@ class Ros2DistributedTransport:
         robot_id: str,
         processing_lock: threading.RLock,
         bow_topic: str = "/dpvo_multi_robot/bow",
+        global_descriptor_topic: str = "/dpvo_multi_robot/global_descriptor",
         constraint_topic: str = "/dpvo_multi_robot/loop_closure",
         service_prefix: str = "/dpvo_multi_robot",
     ):
@@ -52,6 +58,12 @@ class Ros2DistributedTransport:
         self.backend = None
         self.clients = {}
         self.callback_group = ReentrantCallbackGroup()
+        # Detailed keyframe construction runs the local feature front end and
+        # triangulation while holding the DPVO processing lock. Scheduling
+        # several services concurrently would leave executor threads blocked
+        # on that lock and can starve the live image callback. BoW and client
+        # traffic remain reentrant; only heavyweight exports are serialized.
+        self.keyframe_service_group = MutuallyExclusiveCallbackGroup()
 
         bow_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -67,6 +79,18 @@ class Ros2DistributedTransport:
             bow_qos,
             callback_group=self.callback_group,
         )
+        self.global_descriptor_publisher = node.create_publisher(
+            GlobalDescriptorMessage,
+            global_descriptor_topic,
+            bow_qos,
+        )
+        self.global_descriptor_subscription = node.create_subscription(
+            GlobalDescriptorMessage,
+            global_descriptor_topic,
+            self._receive_global_descriptor,
+            bow_qos,
+            callback_group=self.callback_group,
+        )
         self.constraint_publisher = node.create_publisher(
             InterRobotLoopClosure,
             constraint_topic,
@@ -76,7 +100,7 @@ class Ros2DistributedTransport:
             GetKeyframe,
             self._service_name(robot_id),
             self._get_keyframe,
-            callback_group=self.callback_group,
+            callback_group=self.keyframe_service_group,
         )
 
     def _service_name(self, robot_id):
@@ -84,6 +108,9 @@ class Ros2DistributedTransport:
 
     def bind(self, backend):
         self.backend = backend
+
+    def log(self, message):
+        self.node.get_logger().info(message)
 
     def publish_bow(self, frame, bow, vocabulary_id, timestamp):
         if not self.node.context.ok():
@@ -114,6 +141,42 @@ class Ros2DistributedTransport:
             )
         except (TypeError, ValueError) as error:
             self.node.get_logger().warning(f"Rejected malformed BoW message: {error}")
+
+    def publish_global_descriptor(self, frame, descriptor, timestamp):
+        if not self.node.context.ok():
+            return
+        message = GlobalDescriptorMessage()
+        message.header.stamp = _stamp_from_seconds(timestamp)
+        message.header.frame_id = frame.robot_id
+        message.robot_id = frame.robot_id
+        message.session_id = frame.session_id
+        message.keyframe_id = frame.keyframe_id
+        message.model_id = descriptor.model_id
+        message.dimension = descriptor.values.size
+        message.values = descriptor.values.tolist()
+        self.global_descriptor_publisher.publish(message)
+
+    def _receive_global_descriptor(self, message):
+        if self.backend is None:
+            return
+        try:
+            values = np.asarray(message.values, dtype=np.float32)
+            if values.size != int(message.dimension):
+                raise ValueError(
+                    "global descriptor dimension does not match its payload"
+                )
+            self.backend.receive_global_descriptor(
+                FrameIdentity(
+                    message.robot_id,
+                    message.session_id,
+                    int(message.keyframe_id),
+                ),
+                GlobalDescriptor(values, message.model_id),
+            )
+        except (TypeError, ValueError) as error:
+            self.node.get_logger().warning(
+                f"Rejected malformed global descriptor message: {error}"
+            )
 
     def request_keyframe(self, match: BowMatch):
         if not self.node.context.ok():
@@ -255,7 +318,7 @@ class Ros2DistributedTransport:
         message.verification_method = constraint.verification_method
         self.constraint_publisher.publish(message)
         self.node.get_logger().info(
-            "Inter-robot loop %s:%d -> %s:%d: %.3f BoW, %d inliers, "
+            "Inter-robot loop %s:%d -> %s:%d: %.3f retrieval, %d inliers, "
             "scale %.4f, %s"
             % (
                 constraint.query_frame.robot_id,

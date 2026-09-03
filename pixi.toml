@@ -52,6 +52,8 @@ opencv-python = "*"
 yacs = "*"
 matplotlib = "*"
 rerun-sdk = "==0.23.1"
+huggingface-hub = "*"
+safetensors = "*"
 
 [activation.env]
 PYTHONNOUSERSITE = "1"
@@ -73,4 +75,4 @@ build-retrieval = { cmd = "CMAKE_ARGS=\"-DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DOpen
 verify-classic = { cmd = "python -c \"import dpretrieval; print('DPRetrieval', dpretrieval.__version__, 'OK')\"", depends-on = ["build-retrieval"] }
 install-teaser = { cmd = "python -m pip install --no-deps 'git+https://github.com/MIT-SPARK/TEASER-plusplus.git@52a9c52ee7d4c838c5e8a75458c33178be5bfb70'" }
 verify-teaser = { cmd = "python -c \"import teaserpp_python; print('TEASER++ Python: OK')\"", depends-on = ["install-teaser"] }
-verify-multi-robot = { cmd = "python -m unittest tests.test_distributed_loop_closure tests.test_centralized_pgo -v", depends-on = ["verify-classic", "verify-teaser"] }
+verify-multi-robot = { cmd = "python -m unittest tests.test_distributed_loop_closure tests.test_learned_loop_frontend tests.test_centralized_pgo -v", depends-on = ["verify-classic", "verify-teaser"] }

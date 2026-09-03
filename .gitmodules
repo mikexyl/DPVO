@@ -4,6 +4,10 @@
 [submodule "DBoW2"]
 	path = DBoW2
 	url = https://github.com/lahavlipson/DBoW2.git
+[submodule "cbs"]
+	path = cbs
+	url = git@github.com:mikexyl/cbs.git
+	branch = codex/joint-anchor-local-scale
 [submodule "paper/icra2027"]
 	path = paper/icra2027
 	url = git@github.com:mikexyl/scale-aware-dpgo-paper.git

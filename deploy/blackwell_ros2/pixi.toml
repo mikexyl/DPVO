@@ -45,6 +45,9 @@ matplotlib = "*"
 rerun-sdk = "==0.23.1"
 rosbags = "==0.11.5"
 scipy = "*"
+huggingface-hub = "*"
+safetensors = "*"
+depth-anything-3 = { git = "https://github.com/ByteDance-Seed/Depth-Anything-3.git", rev = "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4" }
 
 [activation.env]
 PYTHONNOUSERSITE = "1"
@@ -63,4 +66,5 @@ build-retrieval = { cmd = "CMAKE_ARGS=\"-DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DOpen
 verify-classic = { cmd = "python -c \"import dpretrieval; print('DPRetrieval', dpretrieval.__version__, 'OK')\"", depends-on = ["build-retrieval"] }
 install-teaser = { cmd = "python -m pip install --no-deps 'git+https://github.com/MIT-SPARK/TEASER-plusplus.git@52a9c52ee7d4c838c5e8a75458c33178be5bfb70'" }
 verify-teaser = { cmd = "python -c \"import teaserpp_python; print('TEASER++ Python: OK')\"", depends-on = ["install-teaser"] }
-verify-multi-robot = { cmd = "cd ../.. && python -m unittest tests.test_distributed_loop_closure tests.test_centralized_pgo -v", depends-on = ["verify", "verify-classic", "verify-teaser"] }
+verify-multi-robot = { cmd = "cd ../.. && python -m unittest tests.test_distributed_loop_closure tests.test_learned_loop_frontend tests.test_centralized_pgo -v", depends-on = ["verify", "verify-classic", "verify-teaser"] }
+dense-reconstruct = { cmd = "cd ../.. && python deploy/blackwell_ros2/reconstruct_cbs_dense_map.py" }

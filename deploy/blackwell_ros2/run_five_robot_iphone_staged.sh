@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Track 302_4 through 302_8 as five independent agents, then perform offline
+# top-1 loop verification and DPGO from the resulting raw graph.
+
+STAGE="${1:-all}"
+case "$STAGE" in
+  stage1|stage2|stage3|all) ;;
+  *)
+    echo "usage: $0 [stage1|stage2|stage3|all]" >&2
+    exit 2
+    ;;
+esac
+
+DPVO_DEPLOY_ROOT="${DPVO_ROOT:-/data3/dpvo_cbs_ws/src/DPVO}"
+DPVO_DATA_ROOT="${DPVO_IPHONE_ROOT:-/data3/dpvo_cbs_ws/data/iphone_302_4_8_five_robot}"
+DPVO_RESULTS="${DPVO_RESULTS_ROOT:-/data3/dpvo_cbs_ws/results}"
+DPVO_RESULT_TAG="${DPVO_OUTPUT_TAG:-iphone_302_4_5_6_7_8_five_robot_staged_20260831}"
+DPVO_LEARNED_MODELS="${DPVO_LEARNED_MODEL_ROOT:-/data3/mikexyl/models/dpvo_loop_frontend}"
+DPVO_CBS_DEPENDENCY_PREFIX="${DPVO_CBS_DEPENDENCY_PREFIX:-/home/mikexyl/workspaces/sb_slam_ros2/install}"
+DPVO_PIXI_MANIFEST="$DPVO_DEPLOY_ROOT/deploy/blackwell_ros2/pixi.toml"
+
+RUN_DIR="$DPVO_RESULTS/$DPVO_RESULT_TAG"
+ARTIFACT_ROOT="$RUN_DIR/tracking"
+GV_DIR="$RUN_DIR/geometric_verification"
+DPGO_DIR="$RUN_DIR/dpgo"
+ROS_LOG_DIR="${ROS_LOG_DIR:-$RUN_DIR/ros_log}"
+
+export PATH="/home/mikexyl/.pixi/bin:$PATH"
+export DPVO_ROOT="$DPVO_DEPLOY_ROOT"
+export DPVO_IPHONE_ROOT="$DPVO_DATA_ROOT"
+export DPVO_RESULTS_ROOT="$DPVO_RESULTS"
+export DPVO_OUTPUT_TAG="$DPVO_RESULT_TAG"
+export DPVO_PIXI_MANIFEST
+export TORCH_HOME="${TORCH_HOME:-$DPVO_LEARNED_MODELS/torch}"
+export HF_HOME="${HF_HOME:-$DPVO_LEARNED_MODELS/huggingface}"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-63}"
+export ROS_LOG_DIR
+export PYTHONWARNINGS="${DPVO_PYTHONWARNINGS:-ignore::FutureWarning,ignore::DeprecationWarning}"
+export LD_LIBRARY_PATH="$DPVO_CBS_DEPENDENCY_PREFIX/gtsam/lib:$DPVO_CBS_DEPENDENCY_PREFIX/aria_common/lib:$DPVO_CBS_DEPENDENCY_PREFIX/aria_viz/lib:${LD_LIBRARY_PATH:-}"
+export CUDA_MPS_PIPE_DIRECTORY="${CUDA_MPS_PIPE_DIRECTORY:-/tmp/dpvo-iphone-five-robot-mps-pipe}"
+export CUDA_MPS_LOG_DIRECTORY="${CUDA_MPS_LOG_DIRECTORY:-/tmp/dpvo-iphone-five-robot-mps-log}"
+
+mkdir -p "$RUN_DIR" "$ROS_LOG_DIR" "$CUDA_MPS_PIPE_DIRECTORY" "$CUDA_MPS_LOG_DIRECTORY"
+
+MPS_STARTED=0
+if [[ ! -S "$CUDA_MPS_PIPE_DIRECTORY/control" ]]; then
+  nvidia-cuda-mps-control -d
+  MPS_STARTED=1
+fi
+
+stop_private_mps() {
+  if [[ "$MPS_STARTED" == "1" && -S "$CUDA_MPS_PIPE_DIRECTORY/control" ]]; then
+    echo quit | nvidia-cuda-mps-control >/dev/null
+  fi
+}
+trap stop_private_mps EXIT
+
+run_stage1() {
+  echo "[stage1] Tracking five videos; inter-robot retrieval/GV/PGO are disabled"
+  export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE="${DPVO_TRACKING_MPS_PERCENTAGE:-20}"
+  unset COLCON_CURRENT_PREFIX
+  set +u
+  source /opt/ros/jazzy/setup.bash
+  source "$DPVO_DEPLOY_ROOT/build/ros2-install/setup.bash"
+  set -u
+  rerun_args=()
+  if [[ -n "${DPVO_RERUN_CONNECT:-}" ]]; then
+    rerun_args+=(
+      "rerun_connect:=$DPVO_RERUN_CONNECT"
+      "rerun_recording_id:=${DPVO_RERUN_RECORDING_ID:-$DPVO_RESULT_TAG-tracking}"
+    )
+  fi
+  ros2 launch dpvo_multi_robot five_robot_tum_track.launch.py \
+    dataset_root:="$DPVO_DATA_ROOT" \
+    sequence0:="${DPVO_IPHONE_SEQUENCE0:-302_4}" \
+    sequence1:="${DPVO_IPHONE_SEQUENCE1:-302_5}" \
+    sequence2:="${DPVO_IPHONE_SEQUENCE2:-302_6}" \
+    sequence3:="${DPVO_IPHONE_SEQUENCE3:-302_7}" \
+    sequence4:="${DPVO_IPHONE_SEQUENCE4:-302_8}" \
+    network:="$DPVO_DEPLOY_ROOT/dpvo.pth" \
+    config:="$DPVO_DEPLOY_ROOT/config/default.yaml" \
+    orb_vocab:="$DPVO_DATA_ROOT/ORBvoc.txt" \
+    tracking_artifact_output:="$ARTIFACT_ROOT" \
+    stride:="${DPVO_STRIDE:-1}" \
+    image_scale:="${DPVO_IMAGE_SCALE:-0.5}" \
+    max_frames:="${DPVO_MAX_FRAMES:-0}" \
+    random_seed:="${DPVO_RANDOM_SEED:-1234}" \
+    local_feature_backend:="${DPVO_LOCAL_FEATURE_BACKEND:-disk}" \
+    bow_threshold:="${DPVO_BOW_THRESHOLD:-0.01}" \
+    camera_crop_x:=0 camera_crop_y:=0 \
+    camera_fx:=727.10 camera_fy:=727.10 \
+    camera_cx:=960.0 camera_cy:=540.0 \
+    camera_k1:=0.00044 camera_k2:=0.0 \
+    camera_p1:=0.0 camera_p2:=0.0 camera_k3:=0.0 \
+    "${rerun_args[@]}" \
+    2>&1 | tee "$RUN_DIR/stage1_tracking.log"
+
+  pixi run --manifest-path "$DPVO_PIXI_MANIFEST" python -m \
+    dpvo.loop_closure.offline_multirobot assemble \
+    --artifact-root "$ARTIFACT_ROOT" \
+    --output-base "$ARTIFACT_ROOT/unoptimized_tracking_graph" \
+    --anchor-robot robot0 \
+    --odometry-weight "${DPVO_POSE_GRAPH_ODOMETRY_WEIGHT:-100.0}"
+}
+
+run_stage2() {
+  echo "[stage2] Sequential top-1 DBoW2 -> DISK/LightGlue -> TEASER++"
+  export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE="${DPVO_GV_MPS_PERCENTAGE:-100}"
+  pixi run --manifest-path "$DPVO_PIXI_MANIFEST" python -m \
+    dpvo.loop_closure.offline_multirobot verify \
+    --artifact-root "$ARTIFACT_ROOT" \
+    --orb-vocab "$DPVO_DATA_ROOT/ORBvoc.txt" \
+    --output-dir "$GV_DIR" \
+    --anchor-robot robot0 \
+    --local-feature-backend "${DPVO_LOCAL_FEATURE_BACKEND:-disk}" \
+    --bow-threshold "${DPVO_BOW_THRESHOLD:-0.01}" \
+    --bow-repetitions "${DPVO_BOW_REPETITIONS:-1}" \
+    --bow-nms-radius "${DPVO_BOW_NMS_RADIUS:-10}" \
+    --teaser-noise-bound "${DPVO_TEASER_NOISE_BOUND:-0.10}" \
+    --min-inliers "${DPVO_MIN_INLIERS:-15}" \
+    --min-inlier-ratio "${DPVO_MIN_INLIER_RATIO:-0.15}" \
+    --max-depth "${DPVO_MAX_DEPTH:-20.0}" \
+    --odometry-weight "${DPVO_POSE_GRAPH_ODOMETRY_WEIGHT:-100.0}" \
+    --random-seed "${DPVO_RANDOM_SEED:-1234}" \
+    2>&1 | tee "$RUN_DIR/stage2_geometric_verification.log"
+}
+
+run_stage3() {
+  echo "[stage3] CBS and both centralized baselines consume the same raw graph"
+  export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE="${DPVO_DPGO_MPS_PERCENTAGE:-100}"
+  dpgo_args=(
+    --input-graph "$GV_DIR/unoptimized_verified_graph.json"
+    --output-dir "$DPGO_DIR"
+    --cbs-executable "${DPVO_CBS_EXECUTABLE:-$DPVO_DEPLOY_ROOT/build/cbs/examples/cbs_dpvo_sim3_offline}"
+    --iterations "${DPVO_CBS_ITERATIONS:-1000}"
+    --stage-mode "${DPVO_CBS_STAGE_MODE:-alternating}"
+    --anchor-start-iteration "${DPVO_CBS_ANCHOR_START_ITERATION:-30}"
+    --anchor-stage-probability "${DPVO_CBS_ANCHOR_STAGE_PROBABILITY:-0.5}"
+    --pose-warmup-iterations "${DPVO_CBS_POSE_WARMUP_ITERATIONS:-0}"
+    --pose-block-iterations "${DPVO_CBS_POSE_BLOCK_ITERATIONS:-20}"
+    --anchor-block-iterations "${DPVO_CBS_ANCHOR_BLOCK_ITERATIONS:-20}"
+    --target-hellinger "${DPVO_CBS_TARGET_HELLINGER:-0.1}"
+    --contract-alpha "${DPVO_CBS_CONTRACT_ALPHA:-0.95}"
+    --d-reset "${DPVO_CBS_D_RESET:-0.6}"
+    --odom-scale-sigma "${DPVO_CBS_ODOM_SCALE_SIGMA:--1.0}"
+    --inter-loop-scale-sigma "${DPVO_CBS_INTER_LOOP_SCALE_SIGMA:--1.0}"
+    --huber-k "${DPVO_CBS_HUBER_K:--1.0}"
+    --centralized-max-iterations "${DPVO_CENTRALIZED_MAX_ITERATIONS:-300}"
+    --random-seed "${DPVO_CBS_RANDOM_SEED:-42}"
+  )
+  if [[ -n "${DPVO_RERUN_CONNECT:-}" ]]; then
+    dpgo_args+=(--rerun-stream --rerun-url "$DPVO_RERUN_CONNECT")
+  fi
+  pixi run --manifest-path "$DPVO_PIXI_MANIFEST" python -m \
+    dpvo.loop_closure.offline_dpgo "${dpgo_args[@]}" \
+    2>&1 | tee "$RUN_DIR/stage3_dpgo.log"
+}
+
+case "$STAGE" in
+  stage1) run_stage1 ;;
+  stage2) run_stage2 ;;
+  stage3) run_stage3 ;;
+  all)
+    run_stage1
+    run_stage2
+    run_stage3
+    ;;
+esac
+
+echo "Completed $STAGE: $RUN_DIR"

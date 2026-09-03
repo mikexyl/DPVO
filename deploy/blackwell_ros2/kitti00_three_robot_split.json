@@ -1,0 +1,30 @@
+{
+  "dataset": "KITTI odometry",
+  "sequence": "00",
+  "frame_count": 4541,
+  "frame_rate_hz": 10.0,
+  "windows": {
+    "robot0": [0, 1450],
+    "robot1": [1450, 3000],
+    "robot2": [3000, 4541]
+  },
+  "window_semantics": "zero-based half-open raw frame ranges",
+  "runtime_stride": 2,
+  "selection": {
+    "ground_truth_used_only_for_split_selection_and_evaluation": true,
+    "ground_truth_available_to_runtime_pipeline": false,
+    "spatial_radius_m": 12.0,
+    "maximum_heading_difference_deg": 45.0,
+    "boundary_exclusion_frames": 100,
+    "same_direction_close_frames": {
+      "robot0_robot1": 132,
+      "robot0_robot2": 680,
+      "robot1_robot2": 129
+    }
+  },
+  "constraints": [
+    "Every source frame belongs to exactly one robot.",
+    "Each robot receives one temporally contiguous stream.",
+    "No image or timestamp is replayed by multiple robots."
+  ]
+}

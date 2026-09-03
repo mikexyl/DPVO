@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import faulthandler
+import json
+import os
 from pathlib import Path
+import signal
 import threading
 import time
 import uuid
@@ -19,13 +23,18 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import Header
+from std_msgs.msg import Bool, Header
 import torch
 
+from dpvo import projective_ops as pops
 from dpvo.config import cfg as default_cfg
 from dpvo.dpvo import DPVO
 from dpvo.lietorch import SE3
 from dpvo.loop_closure.distributed import DistributedLongTermLoopClosure
+from dpvo.loop_closure.tracking_artifact import (
+    save_tracking_artifact,
+    write_incomplete_manifest,
+)
 from dpvo.map_gauge import transform_poses_xyzw
 
 from .transport import Ros2DistributedTransport
@@ -37,10 +46,18 @@ class MultiRobotDpvoNode(Node):
         self._declare_parameters()
 
         self.robot_id = self.get_parameter("robot_id").value
+        configured_seed = int(self.get_parameter("random_seed").value)
+        if configured_seed >= 0:
+            np.random.seed(configured_seed % (2**32))
+            torch.manual_seed(configured_seed)
+            torch.cuda.manual_seed_all(configured_seed)
+        self.random_seed = int(torch.initial_seed())
         requested_session = self.get_parameter("session_id").value
         self.session_id = requested_session or (
             f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}"
         )
+        self._closed = False
+        self.shutdown_thread = None
         self.processing_lock = threading.RLock()
         self.callback_group = ReentrantCallbackGroup()
         self.camera = None
@@ -48,6 +65,21 @@ class MultiRobotDpvoNode(Node):
         self.last_published_keyframe = -1
         self.path = PathMessage()
         self.path.header.frame_id = self.get_parameter("map_frame").value
+        artifact_root = self.get_parameter("tracking_artifact_output").value
+        self.tracking_artifact_dir = (
+            Path(artifact_root).expanduser() / self.robot_id
+            if artifact_root
+            else None
+        )
+        if self.tracking_artifact_dir is not None:
+            (self.tracking_artifact_dir / "frames").mkdir(
+                parents=True, exist_ok=True
+            )
+            write_incomplete_manifest(
+                self.tracking_artifact_dir,
+                robot_id=self.robot_id,
+                session_id=self.session_id,
+            )
 
         self.cfg = default_cfg.clone()
         self.cfg.merge_from_file(self.get_parameter("config").value)
@@ -59,11 +91,47 @@ class MultiRobotDpvoNode(Node):
         ).value
         self.cfg.ORB_VOCAB_PATH = self.get_parameter("orb_vocab").value
         self.cfg.LOOP_RETR_THRESH = self.get_parameter("bow_threshold").value
+        self.cfg.MULTI_ROBOT_RETRIEVAL_BACKEND = self.get_parameter(
+            "retrieval_backend"
+        ).value
+        self.cfg.MULTI_ROBOT_MEGALOC_REPO = self.get_parameter(
+            "megaloc_repo"
+        ).value
+        self.cfg.MULTI_ROBOT_MEGALOC_MODEL_ID = self.get_parameter(
+            "megaloc_model_id"
+        ).value
+        self.cfg.MULTI_ROBOT_MEGALOC_DEVICE = self.get_parameter(
+            "megaloc_device"
+        ).value
+        self.cfg.MULTI_ROBOT_MEGALOC_THRESHOLD = self.get_parameter(
+            "megaloc_threshold"
+        ).value
+        self.cfg.MULTI_ROBOT_LOCAL_FEATURE_BACKEND = self.get_parameter(
+            "local_feature_backend"
+        ).value
+        self.cfg.MULTI_ROBOT_XFEAT_REPO = self.get_parameter(
+            "xfeat_repo"
+        ).value
+        self.cfg.MULTI_ROBOT_XFEAT_TOP_K = self.get_parameter(
+            "xfeat_top_k"
+        ).value
+        self.cfg.MULTI_ROBOT_XFEAT_DETECTION_THRESHOLD = self.get_parameter(
+            "xfeat_detection_threshold"
+        ).value
+        self.cfg.MULTI_ROBOT_LIGHTGLUE_MIN_CONFIDENCE = self.get_parameter(
+            "lightglue_min_confidence"
+        ).value
         self.cfg.MULTI_ROBOT_BOW_REPETITIONS = self.get_parameter(
             "bow_repetitions"
         ).value
         self.cfg.MULTI_ROBOT_BOW_NMS = self.get_parameter(
             "bow_nms_radius"
+        ).value
+        self.cfg.MULTI_ROBOT_BOW_BACKFILL = self.get_parameter(
+            "bow_backfill"
+        ).value
+        self.cfg.MULTI_ROBOT_RESERVE_INFLIGHT = self.get_parameter(
+            "reserve_inflight"
         ).value
         self.cfg.MULTI_ROBOT_TEASER_NOISE_BOUND = self.get_parameter(
             "teaser_noise_bound"
@@ -75,12 +143,22 @@ class MultiRobotDpvoNode(Node):
         self.cfg.MULTI_ROBOT_MIN_INLIER_RATIO = self.get_parameter(
             "min_inlier_ratio"
         ).value
+        self.cfg.MULTI_ROBOT_MAX_DEPTH = self.get_parameter("max_depth").value
+        self.cfg.MULTI_ROBOT_KEYFRAME_MAX_ATTEMPTS = self.get_parameter(
+            "keyframe_max_attempts"
+        ).value
+        self.cfg.MULTI_ROBOT_KEYFRAME_RETRY_DELAY = self.get_parameter(
+            "keyframe_retry_delay"
+        ).value
 
         self.transport = Ros2DistributedTransport(
             self,
             self.robot_id,
             self.processing_lock,
             bow_topic=self.get_parameter("bow_topic").value,
+            global_descriptor_topic=self.get_parameter(
+                "global_descriptor_topic"
+            ).value,
             constraint_topic=self.get_parameter("constraint_topic").value,
             service_prefix=self.get_parameter("service_prefix").value,
         )
@@ -129,18 +207,52 @@ class MultiRobotDpvoNode(Node):
             image_qos,
             callback_group=self.callback_group,
         )
+        self.done_subscription = self.create_subscription(
+            Bool,
+            self.get_parameter("done_topic").value,
+            self._player_done,
+            ack_qos,
+            callback_group=self.callback_group,
+        )
         self.distributed_timer = self.create_timer(
             0.05,
             self._process_distributed,
             callback_group=self.callback_group,
         )
+        diagnostics_output = self.get_parameter("loop_diagnostics_output").value
+        self.loop_diagnostics_output = (
+            Path(diagnostics_output).expanduser() if diagnostics_output else None
+        )
+        self.loop_diagnostics_timer = None
+        if self.loop_diagnostics_output is not None:
+            self.loop_diagnostics_timer = self.create_timer(
+                max(
+                    float(self.get_parameter("loop_diagnostics_period").value),
+                    0.1,
+                ),
+                self._write_loop_diagnostics,
+                callback_group=self.callback_group,
+            )
 
+        inter_robot_enabled = bool(
+            self.get_parameter("enable_inter_robot_loop_closure").value
+        )
+        pipeline = "tracking-only"
+        if inter_robot_enabled:
+            pipeline = (
+                f"{self.cfg.MULTI_ROBOT_RETRIEVAL_BACKEND}->"
+                f"{self.cfg.MULTI_ROBOT_LOCAL_FEATURE_BACKEND}->"
+                "lightglue->teaser++"
+            )
         self.get_logger().info(
-            f"multi-robot DPVO ready: robot={self.robot_id}, session={self.session_id}"
+            "multi-robot DPVO ready: "
+            f"robot={self.robot_id}, session={self.session_id}, "
+            f"seed={self.random_seed}, pipeline={pipeline}"
         )
 
     def _declare_parameters(self):
         self.declare_parameter("robot_id", "robot0")
+        self.declare_parameter("random_seed", -1)
         self.declare_parameter("session_id", "")
         self.declare_parameter("network", "dpvo.pth")
         self.declare_parameter("config", "config/fast.yaml")
@@ -155,15 +267,40 @@ class MultiRobotDpvoNode(Node):
         self.declare_parameter("rerun_recording_id", "")
         self.declare_parameter("rerun_entity_prefix", "")
         self.declare_parameter("enable_dpvo_loop_closure", True)
+        self.declare_parameter("enable_inter_robot_loop_closure", True)
+        self.declare_parameter("tracking_artifact_output", "")
+        self.declare_parameter("done_topic", "dpvo/player_done")
+        self.declare_parameter("exit_on_player_done", False)
         self.declare_parameter("max_edge_age", 48)
         self.declare_parameter("bow_threshold", 0.04)
+        self.declare_parameter("retrieval_backend", "megaloc")
+        self.declare_parameter("megaloc_repo", "gmberton/MegaLoc")
+        self.declare_parameter("megaloc_model_id", "gmberton/MegaLoc")
+        self.declare_parameter("megaloc_device", "cuda")
+        self.declare_parameter("megaloc_threshold", 0.20)
+        self.declare_parameter("local_feature_backend", "xfeat")
+        self.declare_parameter("xfeat_repo", "verlab/accelerated_features")
+        self.declare_parameter("xfeat_top_k", 2048)
+        self.declare_parameter("xfeat_detection_threshold", 0.05)
+        self.declare_parameter("lightglue_min_confidence", 0.10)
         self.declare_parameter("bow_repetitions", 3)
         self.declare_parameter("bow_nms_radius", 50)
+        self.declare_parameter("bow_backfill", True)
+        self.declare_parameter("reserve_inflight", True)
         self.declare_parameter("teaser_noise_bound", 0.10)
-        self.declare_parameter("teaser_required", False)
+        self.declare_parameter("teaser_required", True)
         self.declare_parameter("min_inliers", 30)
         self.declare_parameter("min_inlier_ratio", 0.20)
+        self.declare_parameter("max_depth", 20.0)
+        self.declare_parameter("keyframe_max_attempts", 5)
+        self.declare_parameter("keyframe_retry_delay", 0.5)
+        self.declare_parameter("loop_diagnostics_output", "")
+        self.declare_parameter("loop_diagnostics_period", 5.0)
         self.declare_parameter("bow_topic", "/dpvo_multi_robot/bow")
+        self.declare_parameter(
+            "global_descriptor_topic",
+            "/dpvo_multi_robot/global_descriptor",
+        )
         self.declare_parameter(
             "constraint_topic", "/dpvo_multi_robot/loop_closure"
         )
@@ -183,6 +320,91 @@ class MultiRobotDpvoNode(Node):
             return
         try:
             self.slam.long_term_lc.process_transport()
+        finally:
+            self.processing_lock.release()
+
+    def _player_done(self, message):
+        if not message.data or not self.get_parameter("exit_on_player_done").value:
+            return
+        if self.shutdown_thread is not None:
+            return
+        self.get_logger().info("Player complete; finalizing tracking artifact")
+        self.shutdown_thread = threading.Thread(
+            target=self._finalize_and_shutdown,
+            daemon=True,
+        )
+        self.shutdown_thread.start()
+
+    def _finalize_and_shutdown(self):
+        try:
+            self.close()
+        finally:
+            if self.context.ok():
+                rclpy.shutdown(context=self.context)
+
+    def _write_loop_diagnostics(self, force=False):
+        if self.slam is None or self.loop_diagnostics_output is None:
+            return
+        acquired = self.processing_lock.acquire(blocking=force)
+        if not acquired:
+            return
+        try:
+            snapshot = self.slam.long_term_lc.diagnostics_snapshot()
+            snapshot.update(
+                {
+                    "generated_at_unix_ns": time.time_ns(),
+                    "keyframes": int(self.slam.n),
+                    "parameters": {
+                        "retrieval_backend": str(
+                            self.cfg.MULTI_ROBOT_RETRIEVAL_BACKEND
+                        ),
+                        "random_seed": self.random_seed,
+                        "megaloc_model_id": str(
+                            self.cfg.MULTI_ROBOT_MEGALOC_MODEL_ID
+                        ),
+                        "megaloc_threshold": float(
+                            self.cfg.MULTI_ROBOT_MEGALOC_THRESHOLD
+                        ),
+                        "local_feature_backend": str(
+                            self.cfg.MULTI_ROBOT_LOCAL_FEATURE_BACKEND
+                        ),
+                        "xfeat_top_k": int(
+                            self.cfg.MULTI_ROBOT_XFEAT_TOP_K
+                        ),
+                        "xfeat_detection_threshold": float(
+                            self.cfg.MULTI_ROBOT_XFEAT_DETECTION_THRESHOLD
+                        ),
+                        "lightglue_min_confidence": float(
+                            self.cfg.MULTI_ROBOT_LIGHTGLUE_MIN_CONFIDENCE
+                        ),
+                        "bow_threshold": float(self.cfg.LOOP_RETR_THRESH),
+                        "bow_repetitions": int(
+                            self.cfg.MULTI_ROBOT_BOW_REPETITIONS
+                        ),
+                        "bow_nms_radius": int(self.cfg.MULTI_ROBOT_BOW_NMS),
+                        "max_depth": float(self.cfg.MULTI_ROBOT_MAX_DEPTH),
+                        "min_inliers": int(self.cfg.MULTI_ROBOT_MIN_INLIERS),
+                        "min_inlier_ratio": float(
+                            self.cfg.MULTI_ROBOT_MIN_INLIER_RATIO
+                        ),
+                        "teaser_noise_bound": float(
+                            self.cfg.MULTI_ROBOT_TEASER_NOISE_BOUND
+                        ),
+                        "teaser_required": bool(
+                            self.cfg.MULTI_ROBOT_TEASER_REQUIRED
+                        ),
+                    },
+                }
+            )
+            output = self.loop_diagnostics_output
+            output.parent.mkdir(parents=True, exist_ok=True)
+            temporary = Path(f"{output}.tmp")
+            temporary.write_text(json.dumps(snapshot, indent=2) + "\n")
+            temporary.replace(output)
+        except Exception as error:
+            self.get_logger().warning(
+                f"Failed to write loop diagnostics: {error}"
+            )
         finally:
             self.processing_lock.release()
 
@@ -233,13 +455,30 @@ class MultiRobotDpvoNode(Node):
                 ],
                 dtype=np.float32,
             ) * scale
-            image_tensor = torch.from_numpy(np.ascontiguousarray(image)).permute(2, 0, 1).cuda()
+            image_tensor = (
+                torch.from_numpy(np.ascontiguousarray(image))
+                .permute(2, 0, 1)
+                .cuda()
+            )
             intrinsics = torch.from_numpy(intrinsics_np).cuda()
 
             if self.slam is None:
                 self.slam = self._create_slam(image_tensor.shape[1:])
 
             timestamp = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
+            if self.tracking_artifact_dir is not None:
+                input_index = int(self.slam.counter)
+                frame_path = (
+                    self.tracking_artifact_dir
+                    / "frames"
+                    / f"{input_index:08d}.jpg"
+                )
+                if not cv2.imwrite(
+                    str(frame_path),
+                    image,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 95],
+                ):
+                    raise RuntimeError(f"failed to write tracking frame {frame_path}")
             self.slam(timestamp, image_tensor, intrinsics)
             self._publish_pose(message)
             self._publish_ack(message)
@@ -261,6 +500,9 @@ class MultiRobotDpvoNode(Node):
                 robot_id=self.robot_id,
                 session_id=self.session_id,
                 vocabulary_id=vocabulary_id,
+                distributed_enabled=bool(
+                    self.get_parameter("enable_inter_robot_loop_closure").value
+                ),
             )
 
         viewer = self.get_parameter("viewer").value
@@ -324,9 +566,13 @@ class MultiRobotDpvoNode(Node):
         self.path = PathMessage()
         self.path.header.stamp = pose.header.stamp
         self.path.header.frame_id = self.get_parameter("map_frame").value
-        for pose_data in poses:
+        for keyframe_id, pose_data in enumerate(poses):
             path_pose = PoseStamped()
-            path_pose.header = self.path.header
+            path_pose.header.frame_id = self.path.header.frame_id
+            input_index = int(self.slam.pg.tstamps_[keyframe_id])
+            timestamp_ns = int(round(self.slam.tlist[input_index] * 1_000_000_000))
+            path_pose.header.stamp.sec = timestamp_ns // 1_000_000_000
+            path_pose.header.stamp.nanosec = timestamp_ns % 1_000_000_000
             path_pose.pose.position.x = float(pose_data[0])
             path_pose.pose.position.y = float(pose_data[1])
             path_pose.pose.position.z = float(pose_data[2])
@@ -337,17 +583,110 @@ class MultiRobotDpvoNode(Node):
             self.path.poses.append(path_pose)
         self.path_publisher.publish(self.path)
 
+    def _export_tracking_artifact(self, slam, input_poses):
+        if self.tracking_artifact_dir is None:
+            return
+        count = int(slam.n)
+        if count < 1:
+            raise RuntimeError("cannot export an empty DPVO tracking artifact")
+        internal_poses = (
+            slam.pg.poses_[:count].detach().float().cpu().numpy()
+        )
+        local_poses = (
+            SE3(slam.pg.poses_[:count])
+            .inv()
+            .data.detach()
+            .float()
+            .cpu()
+            .numpy()
+        )
+        local_poses = transform_poses_xyzw(
+            slam.pg.session_from_map_, local_poses
+        ).astype(np.float32)
+        input_indices = slam.pg.tstamps_[:count].astype(np.int64, copy=True)
+        timestamps = np.asarray(
+            [slam.tlist[int(index)] for index in input_indices],
+            dtype=np.float64,
+        )
+        patch_disparities = (
+            slam.pg.patches_[:count, :, 2, 1, 1]
+            .median(dim=1)
+            .values.detach()
+            .float()
+            .cpu()
+            .numpy()
+        )
+        with torch.no_grad():
+            points = pops.point_cloud(
+                SE3(slam.poses),
+                slam.patches[:, : slam.m],
+                slam.intrinsics,
+                slam.ix[: slam.m],
+            )
+            points = (
+                points[..., 1, 1, :3] / points[..., 1, 1, 3:]
+            ).reshape(-1, 3)
+            points = points.detach().float().cpu().numpy()
+        colors = (
+            slam.pg.colors_[:count]
+            .reshape(-1, 3)
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        if len(points) != count * slam.M or len(colors) != len(points):
+            raise RuntimeError(
+                f"invalid final sparse map: {len(points)} points, "
+                f"{len(colors)} colors, {count} keyframes, M={slam.M}"
+            )
+        manifest = save_tracking_artifact(
+            self.tracking_artifact_dir,
+            robot_id=self.robot_id,
+            session_id=self.session_id,
+            keyframe_input_indices=input_indices,
+            keyframe_timestamps=timestamps,
+            keyframe_poses_xyzw=local_poses,
+            internal_poses_xyzw=internal_poses,
+            internal_intrinsics=(
+                slam.pg.intrinsics_[:count].detach().float().cpu().numpy()
+            ),
+            patch_disparities=patch_disparities,
+            session_from_map=slam.pg.session_from_map_,
+            input_poses_xyzw=input_poses,
+            map_points=points,
+            map_colors=colors,
+            patches_per_keyframe=slam.M,
+            image_width=slam.wd,
+            image_height=slam.ht,
+            dpvo_resolution=slam.RES,
+            input_frame_count=slam.counter,
+            random_seed=self.random_seed,
+            config_path=self.get_parameter("config").value,
+            network_path=self.get_parameter("network").value,
+        )
+        self.get_logger().info(
+            f"Saved {count}-keyframe tracking artifact: {manifest}"
+        )
+
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
         if self.slam is not None:
             with self.processing_lock:
-                # Three concurrent final DPVO optimization sweeps exceed the
-                # shared GPU's remaining memory. Online BA has already run;
-                # ROS shutdown only needs backend cleanup and Rerun flushing.
-                self.slam.terminate(final_updates=0)
+                # Online BA has already run. Stage one saves the final local
+                # graph but deliberately performs no inter-robot verification.
+                slam = self.slam
+                input_poses, _ = slam.terminate(final_updates=0)
+                self._write_loop_diagnostics(force=True)
+                self._export_tracking_artifact(slam, input_poses)
                 self.slam = None
 
 
 def main(args=None):
+    faulthandler_enabled = os.environ.get("DPVO_FAULTHANDLER", "").lower()
+    if faulthandler_enabled in ("1", "true", "yes"):
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
     rclpy.init(args=args)
     node = MultiRobotDpvoNode()
     executor = MultiThreadedExecutor(num_threads=4)

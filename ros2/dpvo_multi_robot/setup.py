@@ -27,7 +27,13 @@ setup(
         "console_scripts": [
             "dpvo_multi_robot_node = dpvo_multi_robot.bootstrap:main",
             "dpvo_centralized_pgo = dpvo_multi_robot.bootstrap:centralized_pgo_main",
+            "dpvo_cbs_pgo = dpvo_multi_robot.bootstrap:cbs_pgo_main",
             "dpvo_euroc_player = dpvo_multi_robot.bootstrap:euroc_player_main",
+            "dpvo_tum_player = dpvo_multi_robot.bootstrap:tum_player_main",
+            "dpvo_kitti_player = dpvo_multi_robot.bootstrap:kitti_player_main",
+            "dpvo_newer_college_player = dpvo_multi_robot.bootstrap:newer_college_player_main",
+            "dpvo_cu_multi_player = dpvo_multi_robot.bootstrap:cu_multi_player_main",
+            "dpvo_s3e_player = dpvo_multi_robot.bootstrap:s3e_player_main",
         ],
     },
 )

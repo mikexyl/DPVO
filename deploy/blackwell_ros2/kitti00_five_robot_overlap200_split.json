@@ -1,0 +1,21 @@
+{
+  "dataset": "KITTI odometry",
+  "sequence": "00",
+  "frame_count": 4541,
+  "frame_rate_hz": 10.0,
+  "windows": {
+    "robot0": [0, 1008],
+    "robot1": [808, 1916],
+    "robot2": [1716, 2825],
+    "robot3": [2625, 3733],
+    "robot4": [3533, 4541]
+  },
+  "window_semantics": "zero-based half-open raw frame ranges",
+  "runtime_stride": 2,
+  "adjacent_overlap_frames": 200,
+  "constraints": [
+    "Every source frame belongs to at least one robot.",
+    "Each robot receives one temporally contiguous stream.",
+    "Each adjacent pair replays exactly 200 source frames to provide overlap."
+  ]
+}

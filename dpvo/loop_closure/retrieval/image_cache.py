@@ -49,7 +49,15 @@ class ImageCache:
         frame_list = [f"{self.tmpdir.name}/{i:08d}{IMEXT}" for i in idxs]
         assert all(map(os.path.exists, frame_list))
         image_list = [cv2.imread(f) for f in frame_list]
-        return K.image.image_list_to_tensor(image_list).to(device=device)
+        kornia_utils = getattr(K, "utils", None)
+        image_list_to_tensor = getattr(
+            kornia_utils,
+            "image_list_to_tensor",
+            None,
+        )
+        if image_list_to_tensor is None:
+            image_list_to_tensor = K.image.image_list_to_tensor
+        return image_list_to_tensor(image_list).to(device=device)
 
     def keyframe(self, k):
         tmp = dict(self.image_buffer)
