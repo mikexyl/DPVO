@@ -114,6 +114,8 @@ ENV/
 
 # Local inference outputs
 saved_trajectories/
+saved_scene_graphs/
+saved_dense_maps/
 trajectory_plots/
 rerun_recordings/
 env.bak/
@@ -154,6 +156,7 @@ dist
 *.pt
 *.onnx
 *.engine
+mobileclip*.ts
 tests
 checkpoints
 runs

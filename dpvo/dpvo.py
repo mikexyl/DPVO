@@ -33,6 +33,12 @@ class DPVO:
         yolo_confidence=0.25,
         yolo_image_size=640,
         yolo_task=None,
+        scene_graph=False,
+        scene_graph_output=None,
+        da3_engine=None,
+        dense_map_output=None,
+        dense_map_stride=7,
+        dense_map_max_error=0.25,
     ):
         self.cfg = cfg
         self.load_weights(network)
@@ -100,6 +106,12 @@ class DPVO:
                 yolo_confidence,
                 yolo_image_size,
                 yolo_task,
+                scene_graph,
+                scene_graph_output,
+                da3_engine,
+                dense_map_output,
+                dense_map_stride,
+                dense_map_max_error,
             )
 
     def load_long_term_loop_closure(self):
@@ -143,6 +155,12 @@ class DPVO:
         yolo_confidence=0.25,
         yolo_image_size=640,
         yolo_task=None,
+        scene_graph=False,
+        scene_graph_output=None,
+        da3_engine=None,
+        dense_map_output=None,
+        dense_map_stride=7,
+        dense_map_max_error=0.25,
     ):
         if viewer == "pangolin":
             from dpviewer import Viewer
@@ -168,6 +186,13 @@ class DPVO:
                 yolo_confidence=yolo_confidence,
                 yolo_image_size=yolo_image_size,
                 yolo_task=yolo_task,
+                scene_graph=scene_graph,
+                scene_graph_output=scene_graph_output,
+                da3_engine=da3_engine,
+                dense_map_output=dense_map_output,
+                dense_map_stride=dense_map_stride,
+                dense_map_max_error=dense_map_max_error,
+                keyframe_delay=self.cfg.KEYFRAME_INDEX,
             )
         else:
             raise ValueError(f"Unknown viewer: {viewer}")

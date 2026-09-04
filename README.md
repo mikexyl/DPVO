@@ -151,8 +151,79 @@ pixi run python demo.py \
     --stride=5 \
     --viewer=rerun \
     --yolo-model=yolo26n-seg.engine \
-    --yolo-task=segment
+    --yolo-task=segment \
+    --scene-graph
 ```
+
+With `--scene-graph`, YOLO mask instances are associated with DPVO patch
+landmarks to form persistent object nodes. Rerun shows both a top-down graph
+view and the object graph in 3D. The graph is also written to
+`saved_scene_graphs/<name>.json`; use `--scene-graph-output` to choose another
+path. Positions and relation distances use DPVO's monocular (scale-ambiguous)
+world coordinates.
+
+For open-vocabulary instance segmentation, bake text prompts into a YOLOE-26
+TensorRT engine before running the same command:
+
+```bash
+pixi run python export_yolo26_engine.py \
+    --model yoloe-26n-seg.pt \
+    --classes "office chair" desk "computer monitor" laptop keyboard \
+              "computer mouse" "filing cabinet" bookshelf "potted plant" \
+              sofa "coffee table" door whiteboard "trash bin" printer
+```
+
+The exported engine retains those prompted class names and works with
+`--yolo-model=yoloe-26n-seg.engine --yolo-task=segment`.
+
+### Two-view Depth Anything 3 dense mapping
+
+The optional DA3 path runs depth on consecutive retained DPVO keyframes,
+robustly aligns each two-view prediction to DPVO's inverse-depth patches, and
+backprojects confidence-filtered RGB points into the DPVO world frame. Rerun
+shows the aligned depth image and the accumulating dense map. The final map is
+saved as a binary PLY with alignment statistics in an adjacent JSON file.
+
+Fetch the Apache-2.0 DA3-SMALL source and checkpoint used by the exporter:
+
+```bash
+git clone https://github.com/ByteDance-Seed/Depth-Anything-3.git \
+    thirdparty/depth-anything-3
+git -C thirdparty/depth-anything-3 checkout \
+    3d835ec1a5802d64a8b8b15f817a1ab54809bfe4
+pixi run hf download depth-anything/DA3-SMALL \
+    --revision e08cab65ca0ec38e7826075418411ab90cab4da3 \
+    --local-dir models/DA3-SMALL
+```
+
+Export a fixed two-view, 378x504 TensorRT engine. FP32 is the default because
+FP16 can noticeably distort the relative-depth output on some TensorRT/GPU
+combinations.
+
+```bash
+pixi run python export_da3_engine.py \
+    --output da3-small-2view-378x504.engine
+```
+
+Run the Office_01 video at stride 5 without passing any YOLO arguments, which
+keeps the segmentation branch disabled:
+
+```bash
+pixi run python demo.py \
+    --imagedir=/data/scalemaster/Office_01/rgb.mp4 \
+    --calib=calib/office_01.txt \
+    --network=dpvo.pth \
+    --stride=5 \
+    --viewer=rerun \
+    --da3-engine=da3-small-2view-378x504.engine \
+    --dense-map-stride=7 \
+    --name=office_01_da3_dense
+```
+
+DA3 depth is relative, so the PLY remains in DPVO's monocular,
+scale-ambiguous coordinate system. `--dense-map-stride` controls point density,
+`--dense-map-max-error` rejects poorly aligned startup/keyframe pairs, and
+`--dense-map-output` overrides the default `saved_dense_maps/<name>.ply` path.
 
 ### iPhone
 ```bash

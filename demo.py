@@ -38,6 +38,12 @@ def run(
     yolo_confidence=0.25,
     yolo_image_size=640,
     yolo_task=None,
+    scene_graph=False,
+    scene_graph_output=None,
+    da3_engine=None,
+    dense_map_output=None,
+    dense_map_stride=7,
+    dense_map_max_error=0.25,
 ):
 
     slam = None
@@ -72,6 +78,12 @@ def run(
                 yolo_confidence=yolo_confidence,
                 yolo_image_size=yolo_image_size,
                 yolo_task=yolo_task,
+                scene_graph=scene_graph,
+                scene_graph_output=scene_graph_output,
+                da3_engine=da3_engine,
+                dense_map_output=dense_map_output,
+                dense_map_stride=dense_map_stride,
+                dense_map_max_error=dense_map_max_error,
             )
 
         with Timer("SLAM", enabled=timeit):
@@ -125,6 +137,38 @@ if __name__ == '__main__':
     parser.add_argument('--yolo-confidence', type=float, default=0.25)
     parser.add_argument('--yolo-image-size', type=int, default=640)
     parser.add_argument('--yolo-task', choices=['detect', 'segment'])
+    parser.add_argument(
+        '--scene-graph',
+        action='store_true',
+        help='fuse YOLO regions with DPVO patches into persistent 3D object nodes',
+    )
+    parser.add_argument(
+        '--scene-graph-output',
+        metavar='PATH',
+        help='write the scene graph as JSON (also enables --scene-graph)',
+    )
+    parser.add_argument(
+        '--da3-engine',
+        metavar='PATH',
+        help='build an aligned dense map with a fixed two-view DA3 TensorRT engine',
+    )
+    parser.add_argument(
+        '--dense-map-output',
+        metavar='PATH',
+        help='write the aligned dense map as binary PLY',
+    )
+    parser.add_argument(
+        '--dense-map-stride',
+        type=int,
+        default=7,
+        help='sample every Nth DA3 depth pixel for the dense map (default: 7)',
+    )
+    parser.add_argument(
+        '--dense-map-max-error',
+        type=float,
+        default=0.25,
+        help='reject keyframe pairs above this median relative alignment error',
+    )
     parser.add_argument('--plot', action="store_true")
     parser.add_argument('--opts', nargs='+', default=[])
     parser.add_argument('--save_ply', action="store_true")
@@ -140,10 +184,25 @@ if __name__ == '__main__':
         parser.error("Rerun output options cannot be combined with Pangolin")
 
     viewer = args.viewer or (
-        "rerun" if args.rerun_save or args.rerun_connect or args.yolo_model else None
+        "rerun"
+        if args.rerun_save or args.rerun_connect or args.yolo_model or args.da3_engine
+        else None
     )
     if args.yolo_model and viewer != "rerun":
         parser.error("--yolo-model requires the Rerun viewer")
+    if args.da3_engine and viewer != "rerun":
+        parser.error("--da3-engine requires the Rerun viewer")
+    if args.dense_map_output and not args.da3_engine:
+        parser.error("--dense-map-output requires --da3-engine")
+    scene_graph = args.scene_graph or args.scene_graph_output is not None
+    if scene_graph and not args.yolo_model:
+        parser.error("--scene-graph requires --yolo-model")
+    scene_graph_output = args.scene_graph_output
+    if scene_graph and scene_graph_output is None:
+        scene_graph_output = f"saved_scene_graphs/{args.name}.json"
+    dense_map_output = args.dense_map_output
+    if args.da3_engine and dense_map_output is None:
+        dense_map_output = f"saved_dense_maps/{args.name}.ply"
 
     cfg.merge_from_file(args.config)
     cfg.merge_from_list(args.opts)
@@ -167,6 +226,12 @@ if __name__ == '__main__':
         yolo_confidence=args.yolo_confidence,
         yolo_image_size=args.yolo_image_size,
         yolo_task=args.yolo_task,
+        scene_graph=scene_graph,
+        scene_graph_output=scene_graph_output,
+        da3_engine=args.da3_engine,
+        dense_map_output=dense_map_output,
+        dense_map_stride=args.dense_map_stride,
+        dense_map_max_error=args.dense_map_max_error,
     )
     trajectory = PoseTrajectory3D(positions_xyz=poses[:,:3], orientations_quat_wxyz=poses[:, [6, 3, 4, 5]], timestamps=tstamps)
 

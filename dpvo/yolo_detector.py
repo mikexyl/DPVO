@@ -23,8 +23,12 @@ def _load_tensorrt_bindings():
 class YoloAnnotations:
     boxes: np.ndarray
     class_ids: np.ndarray
+    class_names: list
+    scores: np.ndarray
     labels: list
     colors: np.ndarray
+    image_shape: tuple
+    instance_masks: np.ndarray | None
     segmentation: np.ndarray | None
     segmentation_context: list | None
 
@@ -86,14 +90,16 @@ class YoloTensorRTDetector:
         boxes = result.boxes.xyxy.detach().cpu().numpy().astype(np.float32)
         class_ids = result.boxes.cls.detach().cpu().numpy().astype(np.int64)
         scores = result.boxes.conf.detach().cpu().numpy()
+        class_names = [result.names[int(class_id)] for class_id in class_ids]
         labels = [
-            f"{result.names[int(class_id)]} {score:.2f}"
-            for class_id, score in zip(class_ids, scores)
+            f"{class_name} {score:.2f}"
+            for class_name, score in zip(class_names, scores)
         ]
         colors = self._COLORS[class_ids % len(self._COLORS)]
 
         segmentation = None
         segmentation_context = None
+        instance_masks = None
         if result.masks is not None:
             masks = result.masks.data
             if tuple(masks.shape[-2:]) != tuple(bgr_image.shape[:2]):
@@ -103,6 +109,7 @@ class YoloTensorRTDetector:
                     mode="nearest",
                 )[0]
             masks = masks.detach().cpu().numpy() > 0.5
+            instance_masks = masks
 
             segmentation = np.zeros(bgr_image.shape[:2], dtype=np.uint16)
             # Results are confidence-sorted. Paint lower-confidence masks first so
@@ -124,8 +131,12 @@ class YoloTensorRTDetector:
         return YoloAnnotations(
             boxes=boxes,
             class_ids=class_ids,
+            class_names=class_names,
+            scores=scores,
             labels=labels,
             colors=colors,
+            image_shape=tuple(bgr_image.shape[:2]),
+            instance_masks=instance_masks,
             segmentation=segmentation,
             segmentation_context=segmentation_context,
         )
