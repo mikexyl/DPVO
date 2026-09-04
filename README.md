@@ -131,6 +131,29 @@ python demo.py --imagedir=<path> --calib=<path> \
 pixi run rerun rerun_recordings/result.rrd
 ```
 
+### YOLO26 TensorRT overlays
+
+The Pixi environment includes Ultralytics and TensorRT 10.13 Python bindings.
+Export the engine on the GPU that will run it (TensorRT engines are specific to
+the TensorRT version and target GPU):
+
+```bash
+pixi run python export_yolo26_engine.py --model yolo26n-seg.pt
+```
+
+Run instance segmentation on every stride-selected DPVO frame. Rerun overlays
+the class-colored masks and confidence-labeled boxes on the camera image:
+
+```bash
+pixi run python demo.py \
+    --imagedir=/data/scalemaster/Office_01/rgb.mp4 \
+    --calib=calib/office_01.txt \
+    --stride=5 \
+    --viewer=rerun \
+    --yolo-model=yolo26n-seg.engine \
+    --yolo-task=segment
+```
+
 ### iPhone
 ```bash
 python demo.py --imagedir=movies/IMG_0492.MOV --calib=calib/iphone.txt --stride=5 --plot --viz

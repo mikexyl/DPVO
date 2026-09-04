@@ -29,6 +29,10 @@ class DPVO:
         viewer=None,
         viewer_output=None,
         viewer_connect=None,
+        yolo_model=None,
+        yolo_confidence=0.25,
+        yolo_image_size=640,
+        yolo_task=None,
     ):
         self.cfg = cfg
         self.load_weights(network)
@@ -88,7 +92,15 @@ class DPVO:
         self.viewer = None
         viewer = viewer or ("pangolin" if viz else None)
         if viewer is not None:
-            self.start_viewer(viewer, viewer_output, viewer_connect)
+            self.start_viewer(
+                viewer,
+                viewer_output,
+                viewer_connect,
+                yolo_model,
+                yolo_confidence,
+                yolo_image_size,
+                yolo_task,
+            )
 
     def load_long_term_loop_closure(self):
         try:
@@ -127,6 +139,10 @@ class DPVO:
         viewer="pangolin",
         viewer_output=None,
         viewer_connect=None,
+        yolo_model=None,
+        yolo_confidence=0.25,
+        yolo_image_size=640,
+        yolo_task=None,
     ):
         if viewer == "pangolin":
             from dpviewer import Viewer
@@ -148,6 +164,10 @@ class DPVO:
                 width=self.wd,
                 save_path=viewer_output,
                 connect_url=viewer_connect,
+                yolo_model=yolo_model,
+                yolo_confidence=yolo_confidence,
+                yolo_image_size=yolo_image_size,
+                yolo_task=yolo_task,
             )
         else:
             raise ValueError(f"Unknown viewer: {viewer}")

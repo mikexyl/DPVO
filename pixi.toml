@@ -52,6 +52,11 @@ opencv-python = "*"
 yacs = "*"
 matplotlib = "*"
 rerun-sdk = "==0.23.1"
+ultralytics = "==8.4.138"
+onnx = "==1.22.0"
+onnxslim = "==0.1.96"
+onnxruntime-gpu = "==1.23.2"
+tensorrt-cu12-bindings = "==10.13.2.6"
 
 [activation.env]
 PYTHONNOUSERSITE = "1"

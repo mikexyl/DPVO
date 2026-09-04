@@ -151,6 +151,9 @@ dist
 *.egg-info
 *.vscode/
 *.pth
+*.pt
+*.onnx
+*.engine
 tests
 checkpoints
 runs

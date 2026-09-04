@@ -44,6 +44,10 @@ class RerunViewer:
         width,
         save_path=None,
         connect_url=None,
+        yolo_model=None,
+        yolo_confidence=0.25,
+        yolo_image_size=640,
+        yolo_task=None,
     ):
         self.patch_graph = patch_graph
         self.height = height
@@ -54,6 +58,18 @@ class RerunViewer:
         self.num_frames = 0
         self.num_points = 0
         self.closed = False
+        self.detections = None
+        self.detector = None
+
+        if yolo_model is not None:
+            from .yolo_detector import YoloTensorRTDetector
+
+            self.detector = YoloTensorRTDetector(
+                yolo_model,
+                confidence=yolo_confidence,
+                image_size=yolo_image_size,
+                task=yolo_task,
+            )
 
         blueprint = rrb.Blueprint(
             rrb.Horizontal(
@@ -81,6 +97,8 @@ class RerunViewer:
 
     def update_image(self, image):
         self.image = image.permute(1, 2, 0).detach().cpu().numpy()
+        if self.detector is not None:
+            self.detections = self.detector(self.image)
 
     def update_state(self, intrinsics, num_frames, num_points):
         self.intrinsics = intrinsics.detach().cpu().numpy()
@@ -108,6 +126,34 @@ class RerunViewer:
             "world/camera/image/rgb",
             rr.Image(self.image, color_model="BGR").compress(jpeg_quality=90),
         )
+        if self.detector is not None:
+            detection_path = "world/camera/image/detections"
+            if self.detections is None:
+                rr.log(detection_path, rr.Clear(recursive=False))
+            else:
+                rr.log(
+                    detection_path,
+                    rr.Boxes2D(
+                        array=self.detections.boxes,
+                        array_format=rr.Box2DFormat.XYXY,
+                        class_ids=self.detections.class_ids,
+                        labels=self.detections.labels,
+                        colors=self.detections.colors,
+                        show_labels=True,
+                    ),
+                )
+
+            segmentation_path = "world/camera/image/segmentation"
+            if self.detections is None or self.detections.segmentation is None:
+                rr.log(segmentation_path, rr.Clear(recursive=True))
+            else:
+                rr.log(
+                    f"{segmentation_path}/mask",
+                    rr.SegmentationImage(
+                        self.detections.segmentation,
+                        opacity=0.5,
+                    ),
+                )
 
         if self.num_frames > 0:
             poses = _invert_poses(self.patch_graph.poses_[: self.num_frames])
