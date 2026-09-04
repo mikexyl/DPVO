@@ -19,7 +19,7 @@ dependencies:
     - einops
     - pypose
     - kornia
-    - numpy==1.26.4
+    - numpy==2.2.6
     - plyfile
     - evo
     - opencv-python

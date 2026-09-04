@@ -148,6 +148,10 @@ class RerunViewer:
                 rr.log(segmentation_path, rr.Clear(recursive=True))
             else:
                 rr.log(
+                    segmentation_path,
+                    rr.AnnotationContext(self.detections.segmentation_context),
+                )
+                rr.log(
                     f"{segmentation_path}/mask",
                     rr.SegmentationImage(
                         self.detections.segmentation,

@@ -26,6 +26,7 @@ class YoloAnnotations:
     labels: list
     colors: np.ndarray
     segmentation: np.ndarray | None
+    segmentation_context: list | None
 
 
 class YoloTensorRTDetector:
@@ -92,6 +93,7 @@ class YoloTensorRTDetector:
         colors = self._COLORS[class_ids % len(self._COLORS)]
 
         segmentation = None
+        segmentation_context = None
         if result.masks is not None:
             masks = result.masks.data
             if tuple(masks.shape[-2:]) != tuple(bgr_image.shape[:2]):
@@ -108,10 +110,22 @@ class YoloTensorRTDetector:
             for index in reversed(range(len(masks))):
                 segmentation[masks[index]] = class_ids[index] + 1
 
+            segmentation_context = []
+            for class_id in np.unique(class_ids):
+                color = self._COLORS[class_id % len(self._COLORS)]
+                segmentation_context.append(
+                    (
+                        int(class_id) + 1,
+                        result.names[int(class_id)],
+                        tuple(int(channel) for channel in color),
+                    )
+                )
+
         return YoloAnnotations(
             boxes=boxes,
             class_ids=class_ids,
             labels=labels,
             colors=colors,
             segmentation=segmentation,
+            segmentation_context=segmentation_context,
         )
