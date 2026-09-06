@@ -116,6 +116,8 @@ ENV/
 saved_trajectories/
 saved_scene_graphs/
 saved_dense_maps/
+saved_spheres/
+saved_segmentations/
 trajectory_plots/
 rerun_recordings/
 env.bak/

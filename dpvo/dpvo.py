@@ -39,6 +39,17 @@ class DPVO:
         dense_map_output=None,
         dense_map_stride=7,
         dense_map_max_error=0.25,
+        sam_model=None,
+        sam_points_per_side=32,
+        sam_points_per_batch=16,
+        sam_min_mask_area=100,
+        sam_pred_iou_thresh=0.8,
+        sam_stability_thresh=0.92,
+        sam_output=None,
+        sam_video=False,
+        sam_video_max_tracks=8,
+        sam_video_refresh=10,
+        sam_video_memory=3,
     ):
         self.cfg = cfg
         self.load_weights(network)
@@ -112,6 +123,17 @@ class DPVO:
                 dense_map_output,
                 dense_map_stride,
                 dense_map_max_error,
+                sam_model=sam_model,
+                sam_points_per_side=sam_points_per_side,
+                sam_points_per_batch=sam_points_per_batch,
+                sam_min_mask_area=sam_min_mask_area,
+                sam_pred_iou_thresh=sam_pred_iou_thresh,
+                sam_stability_thresh=sam_stability_thresh,
+                sam_output=sam_output,
+                sam_video=sam_video,
+                sam_video_max_tracks=sam_video_max_tracks,
+                sam_video_refresh=sam_video_refresh,
+                sam_video_memory=sam_video_memory,
             )
 
     def load_long_term_loop_closure(self):
@@ -161,6 +183,17 @@ class DPVO:
         dense_map_output=None,
         dense_map_stride=7,
         dense_map_max_error=0.25,
+        sam_model=None,
+        sam_points_per_side=32,
+        sam_points_per_batch=16,
+        sam_min_mask_area=100,
+        sam_pred_iou_thresh=0.8,
+        sam_stability_thresh=0.92,
+        sam_output=None,
+        sam_video=False,
+        sam_video_max_tracks=8,
+        sam_video_refresh=10,
+        sam_video_memory=3,
     ):
         if viewer == "pangolin":
             from dpviewer import Viewer
@@ -193,6 +226,17 @@ class DPVO:
                 dense_map_stride=dense_map_stride,
                 dense_map_max_error=dense_map_max_error,
                 keyframe_delay=self.cfg.KEYFRAME_INDEX,
+                sam_model=sam_model,
+                sam_points_per_side=sam_points_per_side,
+                sam_points_per_batch=sam_points_per_batch,
+                sam_min_mask_area=sam_min_mask_area,
+                sam_pred_iou_thresh=sam_pred_iou_thresh,
+                sam_stability_thresh=sam_stability_thresh,
+                sam_output=sam_output,
+                sam_video=sam_video,
+                sam_video_max_tracks=sam_video_max_tracks,
+                sam_video_refresh=sam_video_refresh,
+                sam_video_memory=sam_video_memory,
             )
         else:
             raise ValueError(f"Unknown viewer: {viewer}")

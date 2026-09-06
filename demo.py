@@ -44,6 +44,17 @@ def run(
     dense_map_output=None,
     dense_map_stride=7,
     dense_map_max_error=0.25,
+    sam_model=None,
+    sam_points_per_side=32,
+    sam_points_per_batch=16,
+    sam_min_mask_area=100,
+    sam_pred_iou_thresh=0.8,
+    sam_stability_thresh=0.92,
+    sam_output=None,
+    sam_video=False,
+    sam_video_max_tracks=8,
+    sam_video_refresh=10,
+    sam_video_memory=3,
 ):
 
     slam = None
@@ -84,6 +95,17 @@ def run(
                 dense_map_output=dense_map_output,
                 dense_map_stride=dense_map_stride,
                 dense_map_max_error=dense_map_max_error,
+                sam_model=sam_model,
+                sam_points_per_side=sam_points_per_side,
+                sam_points_per_batch=sam_points_per_batch,
+                sam_min_mask_area=sam_min_mask_area,
+                sam_pred_iou_thresh=sam_pred_iou_thresh,
+                sam_stability_thresh=sam_stability_thresh,
+                sam_output=sam_output,
+                sam_video=sam_video,
+                sam_video_max_tracks=sam_video_max_tracks,
+                sam_video_refresh=sam_video_refresh,
+                sam_video_memory=sam_video_memory,
             )
 
         with Timer("SLAM", enabled=timeit):
@@ -129,7 +151,8 @@ if __name__ == '__main__':
         metavar="URL",
         help="stream to a Rerun viewer, e.g. rerun+http://host:9876/proxy",
     )
-    parser.add_argument(
+    segmentation_group = parser.add_mutually_exclusive_group()
+    segmentation_group.add_argument(
         '--yolo-model',
         metavar="PATH",
         help="run a TensorRT YOLO .engine model and overlay detections in Rerun",
@@ -137,6 +160,30 @@ if __name__ == '__main__':
     parser.add_argument('--yolo-confidence', type=float, default=0.25)
     parser.add_argument('--yolo-image-size', type=int, default=640)
     parser.add_argument('--yolo-task', choices=['detect', 'segment'])
+    segmentation_group.add_argument(
+        '--sam-model', metavar='PATH',
+        help='SAM 2.1 Tiny TensorRT bundle .json or reference PyTorch .pt checkpoint',
+    )
+    parser.add_argument('--sam-points-per-side', type=int, default=32,
+                        help='automatic prompt grid width/height (default: 32)')
+    parser.add_argument('--sam-points-per-batch', type=int, default=16,
+                        help='PyTorch prompt batch size (default: 16); TensorRT uses its exported batch')
+    parser.add_argument('--sam-min-mask-area', type=int, default=100,
+                        help='minimum region area in original DPVO image pixels')
+    parser.add_argument('--sam-pred-iou-thresh', type=float, default=0.8,
+                        help='minimum predicted mask IoU, not class confidence (default: 0.8)')
+    parser.add_argument('--sam-stability-thresh', type=float, default=0.92,
+                        help='minimum mask stability score (default: 0.92)')
+    parser.add_argument('--sam-output', metavar='PATH',
+                        help='save per-frame SAM statistics and a final mask preview')
+    parser.add_argument('--sam-video', action='store_true',
+                        help='enable SAM temporal-memory tracking (TRT encoder + BF16 PyTorch video modules)')
+    parser.add_argument('--sam-video-max-tracks', type=int, default=8,
+                        help='maximum automatically seeded video regions (default: 8)')
+    parser.add_argument('--sam-video-refresh', type=int, default=10,
+                        help='discover/re-prompt every N processed frames; 0 seeds once (default: 10)')
+    parser.add_argument('--sam-video-memory', type=int, default=3,
+                        help='memory slots including the prompt frame, 2-7 (default: 3; original SAM: 7)')
     parser.add_argument(
         '--scene-graph',
         action='store_true',
@@ -185,11 +232,29 @@ if __name__ == '__main__':
 
     viewer = args.viewer or (
         "rerun"
-        if args.rerun_save or args.rerun_connect or args.yolo_model or args.da3_engine
+        if args.rerun_save or args.rerun_connect or args.yolo_model or args.sam_model or args.da3_engine
         else None
     )
     if args.yolo_model and viewer != "rerun":
         parser.error("--yolo-model requires the Rerun viewer")
+    if args.sam_model and (args.viz or viewer != "rerun"):
+        parser.error("--sam-model requires the Rerun viewer")
+    if args.sam_model:
+        sam_path = Path(args.sam_model)
+        if sam_path.suffix != ".json" and sam_path.name not in {"sam2.1_hiera_tiny.pt", "sam2.1_t.pt"}:
+            parser.error("--sam-model must be a TensorRT bundle .json or SAM 2.1 Tiny checkpoint")
+        if not sam_path.is_file():
+            parser.error(f"SAM checkpoint not found: {sam_path}")
+    if args.sam_output and not args.sam_model:
+        parser.error("--sam-output requires --sam-model")
+    if args.sam_video and (not args.sam_model or Path(args.sam_model).suffix != '.json'):
+        parser.error("--sam-video requires a TensorRT SAM bundle .json for image features and automatic seeding")
+    if args.sam_video_max_tracks < 1 or args.sam_video_refresh < 0 or not 2 <= args.sam_video_memory <= 7:
+        parser.error("SAM video requires positive track count, nonnegative refresh interval and 2-7 memories")
+    if args.sam_points_per_side < 1 or args.sam_points_per_batch < 1 or args.sam_min_mask_area < 0:
+        parser.error("SAM grid/batch sizes must be positive and minimum mask area nonnegative")
+    if not 0 <= args.sam_pred_iou_thresh <= 1 or not 0 <= args.sam_stability_thresh <= 1:
+        parser.error("SAM quality thresholds must be between zero and one")
     if args.da3_engine and viewer != "rerun":
         parser.error("--da3-engine requires the Rerun viewer")
     if args.dense_map_output and not args.da3_engine:
@@ -203,6 +268,9 @@ if __name__ == '__main__':
     dense_map_output = args.dense_map_output
     if args.da3_engine and dense_map_output is None:
         dense_map_output = f"saved_dense_maps/{args.name}.ply"
+    sam_output = args.sam_output
+    if args.sam_model and sam_output is None:
+        sam_output = f"saved_segmentations/{args.name}.json"
 
     cfg.merge_from_file(args.config)
     cfg.merge_from_list(args.opts)
@@ -232,6 +300,17 @@ if __name__ == '__main__':
         dense_map_output=dense_map_output,
         dense_map_stride=args.dense_map_stride,
         dense_map_max_error=args.dense_map_max_error,
+        sam_model=args.sam_model,
+        sam_points_per_side=args.sam_points_per_side,
+        sam_points_per_batch=args.sam_points_per_batch,
+        sam_min_mask_area=args.sam_min_mask_area,
+        sam_pred_iou_thresh=args.sam_pred_iou_thresh,
+        sam_stability_thresh=args.sam_stability_thresh,
+        sam_output=sam_output,
+        sam_video=args.sam_video,
+        sam_video_max_tracks=args.sam_video_max_tracks,
+        sam_video_refresh=args.sam_video_refresh,
+        sam_video_memory=args.sam_video_memory,
     )
     trajectory = PoseTrajectory3D(positions_xyz=poses[:,:3], orientations_quat_wxyz=poses[:, [6, 3, 4, 5]], timestamps=tstamps)
 

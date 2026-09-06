@@ -124,6 +124,9 @@ class DenseKeyframe:
     scale: float
     median_relative_error: float
     correspondences: int
+    region_ids: np.ndarray | None = None
+    region_colors: np.ndarray | None = None
+    region_context: list | None = None
 
 
 class DenseMapBuilder:
@@ -138,6 +141,7 @@ class DenseMapBuilder:
         keyframe_delay=4,
         point_stride=7,
         max_alignment_error=0.25,
+        region_coloring=None,
     ):
         if point_stride < 1:
             raise ValueError("dense-map point stride must be positive")
@@ -151,12 +155,35 @@ class DenseMapBuilder:
         self.point_stride = point_stride
         self.max_alignment_error = max_alignment_error
         self.images = {}
+        self.region_coloring = region_coloring
+        self.regions = {}
         self.frames = {}
         self.rejected_pairs = []
         self.last_safe_timestamp = None
 
     def cache_image(self, timestamp, bgr_image):
         self.images[int(timestamp)] = np.ascontiguousarray(bgr_image.copy())
+
+    def cache_regions(self, timestamp, annotations):
+        """Keep this frame's discrete SAM IDs on the exact DA3 image grid, on CPU."""
+        if self.region_coloring is None:
+            return
+        atlas = np.zeros((self.inference.height, self.inference.width), dtype=np.uint16)
+        context = [(0, "unassigned", (96, 96, 96))]
+        if annotations is not None and annotations.segmentation is not None:
+            if annotations.segmentation.shape != (self.image_height, self.image_width):
+                raise ValueError("SAM atlas must match the DPVO image dimensions")
+            # Center-aligned nearest sampling preserves integer IDs. Bilinear
+            # interpolation would invent labels at region boundaries.
+            atlas = cv2.resize(annotations.segmentation, (self.inference.width, self.inference.height),
+                               interpolation=cv2.INTER_NEAREST_EXACT).astype(np.uint16)
+            context.extend((int(i), name, tuple(color[:3]))
+                           for i, name, color in annotations.segmentation_context if i != 0)
+        self.regions[int(timestamp)] = (atlas.copy(), context)
+
+    def _prune_cache(self, safe_timestamp):
+        self.images = {t: image for t, image in self.images.items() if t >= safe_timestamp}
+        self.regions = {t: region for t, region in self.regions.items() if t >= safe_timestamp}
 
     def _index_for_timestamp(self, timestamp, num_frames):
         timestamps = self.patch_graph.tstamps_[:num_frames]
@@ -260,6 +287,17 @@ class DenseMapBuilder:
         y = (pixel_y - intrinsics[3]) / intrinsics[1] * sampled_depth
         camera_points = np.stack((x, y, sampled_depth), axis=-1)[valid].astype(np.float32)
         colors = rgb_image[grid_y, grid_x][valid].astype(np.uint8)
+        region_ids = region_colors = region_context = None
+        if self.region_coloring is not None:
+            if timestamp not in self.regions:
+                raise RuntimeError(f"missing same-frame SAM labels for dense keyframe {timestamp}")
+            atlas, region_context = self.regions[timestamp]
+            region_ids = atlas[grid_y, grid_x][valid].copy()
+            palette = np.full((int(atlas.max()) + 1, 3), 96, dtype=np.uint8)
+            for region_id, _, color in region_context:
+                if region_id < len(palette):
+                    palette[region_id] = color
+            region_colors = palette[region_ids]
         return DenseKeyframe(
             timestamp=timestamp,
             camera_points=camera_points,
@@ -268,6 +306,9 @@ class DenseMapBuilder:
             scale=scale,
             median_relative_error=relative_error,
             correspondences=correspondences,
+            region_ids=region_ids,
+            region_colors=region_colors,
+            region_context=region_context,
         )
 
     def _process_pair(self, previous_index, current_index):
@@ -353,11 +394,7 @@ class DenseMapBuilder:
         updates, processed = self._process_pair(previous_index, safe_index)
         if processed:
             self.last_safe_timestamp = safe_timestamp
-            self.images = {
-                timestamp: image
-                for timestamp, image in self.images.items()
-                if timestamp >= safe_timestamp
-            }
+            self._prune_cache(safe_timestamp)
         return updates
 
     def finalize(self, num_frames):
@@ -381,6 +418,7 @@ class DenseMapBuilder:
                 break
             updates.extend(pair_updates)
             self.last_safe_timestamp = int(self.patch_graph.tstamps_[current_index])
+            self._prune_cache(self.last_safe_timestamp)
         return updates
 
     def pose(self, timestamp, num_frames):
@@ -393,6 +431,7 @@ class DenseMapBuilder:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         world_points, colors = [], []
+        region_colors, region_ids, source_timestamps = [], [], []
         frame_stats = []
         for timestamp, frame in sorted(self.frames.items()):
             pose = self.pose(timestamp, num_frames)
@@ -401,6 +440,10 @@ class DenseMapBuilder:
             rotation, translation = _camera_to_world(pose)
             world_points.append(frame.camera_points @ rotation.T + translation)
             colors.append(frame.colors)
+            if self.region_coloring is not None:
+                region_colors.append(frame.region_colors)
+                region_ids.append(frame.region_ids)
+                source_timestamps.append(np.full(len(frame.camera_points), timestamp, dtype=np.uint32))
             frame_stats.append(
                 {
                     "timestamp": timestamp,
@@ -410,6 +453,13 @@ class DenseMapBuilder:
                     "correspondences": frame.correspondences,
                 }
             )
+            if frame.region_ids is not None:
+                ids, counts = np.unique(frame.region_ids, return_counts=True)
+                frame_stats[-1].update(
+                    labeled_points=int(np.count_nonzero(frame.region_ids)),
+                    region_point_counts={str(i): int(n) for i, n in zip(ids, counts)},
+                    region_context=frame.region_context,
+                )
 
         if not world_points:
             raise RuntimeError("dense map contains no aligned keyframes")
@@ -440,5 +490,26 @@ class DenseMapBuilder:
             "rejected_pairs": self.rejected_pairs,
             "frames": frame_stats,
         }
+        if self.region_coloring is not None:
+            region_ids = np.concatenate(region_ids).astype(np.uint16)
+            labeled_vertices = np.empty(len(vertices), dtype=vertices.dtype.descr +
+                                        [("region_id", "<u2"), ("keyframe_timestamp", "<u4")])
+            for name in vertices.dtype.names:
+                labeled_vertices[name] = vertices[name]
+            label_rgb = np.concatenate(region_colors).astype(np.uint8)
+            labeled_vertices["red"], labeled_vertices["green"], labeled_vertices["blue"] = label_rgb.T
+            labeled_vertices["region_id"] = region_ids
+            labeled_vertices["keyframe_timestamp"] = np.concatenate(source_timestamps)
+            region_path = output_path.with_name(output_path.stem + "_sam.ply")
+            PlyData([PlyElement.describe(labeled_vertices, "vertex")], text=False).write(region_path)
+            metadata.update(
+                region_coloring=self.region_coloring,
+                region_map=str(region_path),
+                labeled_points=int(np.count_nonzero(region_ids)),
+                labeled_fraction=float(np.count_nonzero(region_ids) / len(region_ids)) if len(region_ids) else 0.0,
+                unassigned_region_id=0,
+                region_note="SAM region IDs, not semantic classes or globally fused 3D object identities; "
+                            "video IDs may change at discovery refreshes. Unassigned points are gray.",
+            )
         output_path.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n")
         return metadata

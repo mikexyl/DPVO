@@ -1,9 +1,13 @@
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch.nn.functional as F
+
+from .annotations import FrameAnnotations
+
+# Keep existing scene-graph callers and saved experiment scripts compatible.
+YoloAnnotations = FrameAnnotations
 
 
 def _load_tensorrt_bindings():
@@ -17,20 +21,6 @@ def _load_tensorrt_bindings():
         import tensorrt_bindings
 
         sys.modules["tensorrt"] = tensorrt_bindings
-
-
-@dataclass(frozen=True)
-class YoloAnnotations:
-    boxes: np.ndarray
-    class_ids: np.ndarray
-    class_names: list
-    scores: np.ndarray
-    labels: list
-    colors: np.ndarray
-    image_shape: tuple
-    instance_masks: np.ndarray | None
-    segmentation: np.ndarray | None
-    segmentation_context: list | None
 
 
 class YoloTensorRTDetector:

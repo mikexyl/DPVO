@@ -55,6 +55,17 @@ class RerunViewer:
         dense_map_stride=7,
         dense_map_max_error=0.25,
         keyframe_delay=4,
+        sam_model=None,
+        sam_points_per_side=32,
+        sam_points_per_batch=16,
+        sam_min_mask_area=100,
+        sam_pred_iou_thresh=0.8,
+        sam_stability_thresh=0.92,
+        sam_output=None,
+        sam_video=False,
+        sam_video_max_tracks=8,
+        sam_video_refresh=10,
+        sam_video_memory=3,
     ):
         self.patch_graph = patch_graph
         self.height = height
@@ -67,12 +78,22 @@ class RerunViewer:
         self.closed = False
         self.detections = None
         self.detector = None
+        self.sam_segmenter = None
+        self.sam_output = sam_output
+        self.sam_video = sam_video
         self.scene_graph = None
         self.scene_graph_output = scene_graph_output
         self.dense_map = None
         self.dense_map_output = dense_map_output
         self.dense_updates = []
         self._dense_camera_to_world = None
+
+        if sam_model is not None and yolo_model is not None:
+            raise ValueError("SAM and YOLO segmentation backends are mutually exclusive")
+        if sam_model is not None and scene_graph:
+            raise ValueError("SAM's class-agnostic regions cannot populate the semantic scene graph")
+        if sam_video and sam_model is None:
+            raise ValueError("SAM video requires a SAM TensorRT bundle")
 
         if yolo_model is not None:
             from .yolo_detector import YoloTensorRTDetector
@@ -83,6 +104,20 @@ class RerunViewer:
                 image_size=yolo_image_size,
                 task=yolo_task,
             )
+
+        if sam_model is not None:
+            options = dict(points_per_side=sam_points_per_side, min_mask_area=sam_min_mask_area,
+                           pred_iou_thresh=sam_pred_iou_thresh, stability_score_thresh=sam_stability_thresh)
+            if sam_video:
+                from .sam_video import Sam2VideoSegmenter
+                self.sam_segmenter = Sam2VideoSegmenter(
+                    sam_model, **options, max_tracks=sam_video_max_tracks,
+                    refresh_interval=sam_video_refresh, memory_frames=sam_video_memory,
+                )
+            else:
+                from .sam_segmenter import Sam2Segmenter
+                self.sam_segmenter = Sam2Segmenter(sam_model, **options, points_per_batch=sam_points_per_batch)
+            self.detector = self.sam_segmenter
 
         if scene_graph:
             from .scene_graph import SceneGraphBuilder
@@ -100,12 +135,17 @@ class RerunViewer:
                 keyframe_delay=keyframe_delay,
                 point_stride=dense_map_stride,
                 max_alignment_error=dense_map_max_error,
+                region_coloring=("sam_video_track_id" if sam_video else "sam_frame_local_id")
+                if sam_model is not None else None,
             )
             self._dense_camera_to_world = _camera_to_world
 
         camera_view = rrb.Spatial2DView(
             name="Camera",
             origin="world/camera/image",
+            # Dense region boxes obscure the masks; keep them available in the
+            # recording, but hide them in the default SAM camera view.
+            contents=["$origin/**", "- $origin/detections"] if sam_model else "$origin/**",
         )
         right_views = [camera_view]
         row_shares = [2]
@@ -119,15 +159,30 @@ class RerunViewer:
             right_panel = camera_view
         else:
             right_panel = rrb.Vertical(*right_views, row_shares=row_shares)
+        reconstruction = rrb.Spatial3DView(name="Reconstruction", origin="world")
+        if self.dense_map is not None and self.sam_segmenter is not None:
+            reconstruction = rrb.Tabs(
+                rrb.Spatial3DView(
+                    name="SAM-colored Dense Map", origin="world",
+                    contents=["$origin/**", "- $origin/dense/**", "- $origin/points"],
+                ),
+                rrb.Spatial3DView(
+                    name="RGB Dense Map", origin="world",
+                    contents=["$origin/**", "- $origin/dense_sam/**"],
+                ),
+                active_tab=0,
+            )
         blueprint = rrb.Blueprint(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="Reconstruction", origin="world"),
+                reconstruction,
                 right_panel,
                 column_shares=[2, 1],
             ),
+            auto_layout=False,
+            auto_views=False,
             collapse_panels=True,
         )
-        rr.init("DPVO", default_blueprint=blueprint, strict=True)
+        rr.init("DPVO", strict=True)
 
         if save_path is not None and connect_url is not None:
             raise ValueError("Rerun save path and connection URL are mutually exclusive")
@@ -141,7 +196,24 @@ class RerunViewer:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             rr.save(save_path)
 
+        # Send after attaching the sink so saved recordings include the layout.
+        # Make it active to avoid reusing panels from a different DPVO experiment.
+        rr.send_blueprint(blueprint, make_active=True, make_default=True)
         rr.log("world", rr.ViewCoordinates.RDF, static=True)
+        if self.sam_segmenter is not None:
+            info = (
+                "SAM 2.1 video: learned temporal mask memory, persistent track IDs/colors. "
+                "TensorRT image encoder/seeding; BF16 PyTorch video attention, heads and memory encoder. "
+                "Scores are object-presence estimates, not semantic classes. Periodic re-prompting "
+                "refreshes memory and retains IDs only when current-frame masks can be associated."
+                if sam_video else
+                "SAM 2.1 Hiera Tiny: automatic per-frame regions, not semantic classes "
+                "or tracked IDs. Scores are predicted mask IoU. "
+                "Smaller regions take precedence over overlapping large surfaces."
+            )
+            rr.log("segmentation/info", rr.TextDocument(
+                info
+            ), static=True)
 
     def update_image(self, image):
         self.image = image.permute(1, 2, 0).detach().cpu().numpy()
@@ -149,6 +221,8 @@ class RerunViewer:
             self.dense_map.cache_image(self.frame_index, self.image)
         if self.detector is not None:
             self.detections = self.detector(self.image)
+        if self.dense_map is not None and self.sam_segmenter is not None:
+            self.dense_map.cache_regions(self.frame_index, self.detections)
 
     def update_state(self, intrinsics, num_frames, num_points):
         self.intrinsics = intrinsics.detach().cpu().numpy()
@@ -198,7 +272,7 @@ class RerunViewer:
                         class_ids=self.detections.class_ids,
                         labels=self.detections.labels,
                         colors=self.detections.colors,
-                        show_labels=True,
+                        show_labels=self.sam_segmenter is None,
                     ),
                 )
 
@@ -217,6 +291,12 @@ class RerunViewer:
                         opacity=0.5,
                     ),
                 )
+            if self.sam_segmenter is not None and self.sam_segmenter.last_stats is not None:
+                for key in ("masks", "coverage", "seconds"):
+                    rr.log(f"segmentation/{key}", rr.Scalars(self.sam_segmenter.last_stats[key]))
+                if self.sam_video:
+                    for key in ("active_tracks", "memory_records", "refresh"):
+                        rr.log(f"segmentation/{key}", rr.Scalars(float(self.sam_segmenter.last_stats[key])))
 
         if self.num_frames > 0:
             poses = _invert_poses(self.patch_graph.poses_[: self.num_frames])
@@ -274,6 +354,17 @@ class RerunViewer:
                 static=True,
             )
 
+            if frame.region_ids is not None:
+                sam_path = f"world/dense_sam/keyframe_{frame.timestamp:06d}/points"
+                rr.log(sam_path, rr.AnnotationContext(frame.region_context), static=True)
+                rr.log(
+                    sam_path,
+                    rr.Points3D(frame.camera_points, colors=frame.region_colors,
+                                class_ids=frame.region_ids, show_labels=False,
+                                radii=rr.Radius.ui_points(1.0)),
+                    static=True,
+                )
+
         # Refresh recently added keyframe transforms while they are still inside
         # DPVO's optimization window. The point data itself remains static.
         recent = list(self.dense_map.frames.values())[-12:]
@@ -286,8 +377,11 @@ class RerunViewer:
                 f"world/dense/keyframe_{frame.timestamp:06d}",
                 rr.Transform3D(translation=translation, mat3x3=rotation),
             )
+            if frame.region_ids is not None:
+                rr.log(f"world/dense_sam/keyframe_{frame.timestamp:06d}",
+                       rr.Transform3D(translation=translation, mat3x3=rotation))
 
-        if self.dense_updates:
+        if self.dense_updates and self.dense_updates[-1].aligned_depth is not None:
             frame = self.dense_updates[-1]
             finite_depth = frame.aligned_depth[np.isfinite(frame.aligned_depth)]
             if len(finite_depth):
@@ -383,5 +477,8 @@ class RerunViewer:
                 f"Saved dense map to {self.dense_map_output} "
                 f"({metadata['keyframes']} keyframes, {metadata['points']} points)"
             )
+        if self.sam_segmenter is not None and self.sam_output is not None:
+            summary = self.sam_segmenter.save_report(self.sam_output, self.image, self.detections)
+            print(f"Saved SAM segmentation report to {self.sam_output}: {summary}")
         rr.disconnect()
         self.closed = True
