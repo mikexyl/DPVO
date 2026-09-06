@@ -14,23 +14,38 @@ DPVO_DEPLOY_ROOT="${DPVO_ROOT:-/data3/dpvo_cbs_ws/src/DPVO}"
 DPVO_DATA_ROOT="${DPVO_KITTI_ROOT:-/data1/mikexyl/datasets/kitti_odometry/dataset}"
 DPVO_VOCAB="${DPVO_ORB_VOCAB:-/data3/mikexyl/datasets/orb_vocab/ORBvoc.txt}"
 DPVO_RESULTS="${DPVO_RESULTS_ROOT:-/data3/mikexyl/results/dpvo_multi_robot}"
+DPVO_KITTI_SEQUENCE="${DPVO_KITTI_SEQUENCE:-00}"
+DPVO_KITTI_IMAGE_DIR="${DPVO_KITTI_IMAGE_DIR:-image_0}"
+DPVO_KITTI_CALIBRATION_KEY="${DPVO_KITTI_CALIBRATION_KEY:-P0}"
 DPVO_OVERLAP_FRAMES="${DPVO_KITTI_OVERLAP_FRAMES:-200}"
-DPVO_RESULT_TAG="${DPVO_OUTPUT_TAG:-kitti00_ten_robot_overlap${DPVO_OVERLAP_FRAMES}_staged_full_20260901}"
+DPVO_RESULT_TAG="${DPVO_OUTPUT_TAG:-kitti${DPVO_KITTI_SEQUENCE}_ten_robot_overlap${DPVO_OVERLAP_FRAMES}_staged_full_20260901}"
 DPVO_CBS_DEPENDENCY_PREFIX="${DPVO_CBS_DEPENDENCY_PREFIX:-/home/mikexyl/workspaces/sb_slam_ros2/install}"
 DPVO_PIXI_MANIFEST="$DPVO_DEPLOY_ROOT/deploy/blackwell_ros2/pixi.toml"
 
 ROBOT_IDS=(robot0 robot1 robot2 robot3 robot4 robot5 robot6 robot7 robot8 robot9)
-case "$DPVO_OVERLAP_FRAMES" in
-  200)
+case "$DPVO_KITTI_SEQUENCE:$DPVO_OVERLAP_FRAMES" in
+  00:10)
+    STARTS=(0 449 903 1357 1811 2265 2720 3174 3628 4082)
+    ENDS=(459 913 1367 1821 2275 2730 3184 3638 4092 4541)
+    ;;
+  00:200)
     STARTS=(0 354 808 1262 1716 2170 2625 3079 3533 3987)
     ENDS=(554 1008 1462 1916 2370 2825 3279 3733 4187 4541)
     ;;
-  50)
+  00:50)
     STARTS=(0 429 883 1337 1791 2245 2700 3154 3608 4062)
     ENDS=(479 933 1387 1841 2295 2750 3204 3658 4112 4541)
     ;;
+  05:200)
+    STARTS=(0 176 452 728 1004 1280 1557 1833 2109 2385)
+    ENDS=(376 652 928 1204 1480 1757 2033 2309 2585 2761)
+    ;;
+  05:50)
+    STARTS=(0 251 527 803 1079 1355 1632 1908 2184 2460)
+    ENDS=(301 577 853 1129 1405 1682 1958 2234 2510 2761)
+    ;;
   *)
-    echo "unsupported DPVO_KITTI_OVERLAP_FRAMES=$DPVO_OVERLAP_FRAMES (expected 50 or 200)" >&2
+    echo "unsupported KITTI sequence/overlap combination: $DPVO_KITTI_SEQUENCE/$DPVO_OVERLAP_FRAMES" >&2
     exit 2
     ;;
 esac
@@ -67,7 +82,13 @@ stop_private_mps() {
 trap stop_private_mps EXIT
 
 run_stage1() {
-  echo "[stage1] Sequential DPVO tracking for ten KITTI windows with ${DPVO_OVERLAP_FRAMES}-frame overlap"
+  sequence_dir="$DPVO_DATA_ROOT/sequences/$DPVO_KITTI_SEQUENCE"
+  image_dir="$sequence_dir/$DPVO_KITTI_IMAGE_DIR"
+  if [[ ! -d "$image_dir" || ! -f "$sequence_dir/times.txt" ]]; then
+    echo "KITTI input is incomplete: $image_dir and $sequence_dir/times.txt are required" >&2
+    exit 2
+  fi
+  echo "[stage1] Sequential DPVO tracking for KITTI $DPVO_KITTI_SEQUENCE in ten windows with ${DPVO_OVERLAP_FRAMES}-frame overlap"
   export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=100
   unset COLCON_CURRENT_PREFIX
   set +u
@@ -83,9 +104,9 @@ run_stage1() {
       | tee -a "$RUN_DIR/stage1_tracking.log"
     ros2 launch dpvo_multi_robot single_robot_kitti_track.launch.py \
       dataset_root:="$DPVO_DATA_ROOT" \
-      sequence:="${DPVO_KITTI_SEQUENCE:-00}" \
-      image_dir:="${DPVO_KITTI_IMAGE_DIR:-image_0}" \
-      calibration_key:="${DPVO_KITTI_CALIBRATION_KEY:-P0}" \
+      sequence:="$DPVO_KITTI_SEQUENCE" \
+      image_dir:="$DPVO_KITTI_IMAGE_DIR" \
+      calibration_key:="$DPVO_KITTI_CALIBRATION_KEY" \
       robot_id:="$robot_id" \
       start_frame:="${STARTS[$robot_index]}" \
       end_frame:="${ENDS[$robot_index]}" \
@@ -135,7 +156,20 @@ run_stage2() {
 }
 
 run_stage3() {
-  echo "[stage3] CBS 20-pose/20-anchor blocks and centralized PGO consume the same graph"
+  pose_block_iterations="${DPVO_CBS_POSE_BLOCK_ITERATIONS:-20}"
+  anchor_block_iterations="${DPVO_CBS_ANCHOR_BLOCK_ITERATIONS:-20}"
+  target_hellinger="${DPVO_CBS_TARGET_HELLINGER:-0.1}"
+  # This option initializes only centralized baselines, never CBS.
+  bootstrap_robot_anchors="${DPVO_CBS_BOOTSTRAP_ROBOT_ANCHORS:-true}"
+  case "$bootstrap_robot_anchors" in
+    true|1|yes) bootstrap_robot_anchor_flag=(--bootstrap-robot-anchors) ;;
+    false|0|no) bootstrap_robot_anchor_flag=(--no-bootstrap-robot-anchors) ;;
+    *)
+      echo "invalid DPVO_CBS_BOOTSTRAP_ROBOT_ANCHORS=$bootstrap_robot_anchors (expected true or false)" >&2
+      exit 2
+      ;;
+  esac
+  echo "[stage3] CBS ${pose_block_iterations}-pose/${anchor_block_iterations}-anchor blocks with fixed target Hellinger ${target_hellinger}, no global initialization; centralized-only robot-anchor bootstrap ${bootstrap_robot_anchors}; both consume the same graph"
   pixi run --manifest-path "$DPVO_PIXI_MANIFEST" python -m \
     dpvo.loop_closure.offline_dpgo \
     --input-graph "$GV_DIR/unoptimized_verified_graph.json" \
@@ -146,9 +180,10 @@ run_stage3() {
     --anchor-start-iteration "${DPVO_CBS_ANCHOR_START_ITERATION:-30}" \
     --anchor-stage-probability "${DPVO_CBS_ANCHOR_STAGE_PROBABILITY:-0.5}" \
     --pose-warmup-iterations "${DPVO_CBS_POSE_WARMUP_ITERATIONS:-0}" \
-    --pose-block-iterations "${DPVO_CBS_POSE_BLOCK_ITERATIONS:-20}" \
-    --anchor-block-iterations "${DPVO_CBS_ANCHOR_BLOCK_ITERATIONS:-20}" \
-    --target-hellinger "${DPVO_CBS_TARGET_HELLINGER:-0.1}" \
+    --pose-block-iterations "$pose_block_iterations" \
+    --anchor-block-iterations "$anchor_block_iterations" \
+    --target-hellinger "$target_hellinger" \
+    "${bootstrap_robot_anchor_flag[@]}" \
     --contract-alpha "${DPVO_CBS_CONTRACT_ALPHA:-0.95}" \
     --d-reset "${DPVO_CBS_D_RESET:-0.6}" \
     --odom-scale-sigma "${DPVO_CBS_ODOM_SCALE_SIGMA:--1.0}" \

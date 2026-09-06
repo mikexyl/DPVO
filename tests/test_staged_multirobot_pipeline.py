@@ -1,5 +1,8 @@
 import argparse
+import csv
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +29,125 @@ from dpvo.loop_closure.tracking_artifact import (
     save_tracking_artifact,
     write_raw_pose_graph,
 )
+
+
+class KittiFiveRobotPartitionTest(unittest.TestCase):
+    def _read_runner_partition(self, overlap=None):
+        deploy = Path(__file__).resolve().parents[1] / "deploy/blackwell_ros2"
+        runner = (deploy / "run_five_robot_kitti_staged.sh").read_text()
+        # Execute configuration only: no filesystem, ROS, GPU or data access.
+        configuration = runner.split('RUN_DIR=', 1)[0]
+        environment = dict(os.environ)
+        environment.pop("DPVO_KITTI_OVERLAP_FRAMES", None)
+        if overlap is not None:
+            environment["DPVO_KITTI_OVERLAP_FRAMES"] = str(overlap)
+        result = subprocess.run(
+            ["bash", "-s", "--", "stage1"],
+            input=(
+                configuration + '\nfor i in 0 1 2 3 4; do '
+                'printf "%s %s\\n" "${STARTS[$i]}" "${ENDS[$i]}"; done\n'
+            ),
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return deploy, result
+
+    def _assert_partition_matches_manifest(self, overlap):
+        deploy, result = self._read_runner_partition(overlap)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        windows = [
+            list(map(int, line.split())) for line in result.stdout.splitlines()
+        ]
+        manifest = json.loads(
+            (deploy / f"kitti00_five_robot_overlap{overlap}_split.json").read_text()
+        )
+        self.assertEqual(windows, list(manifest["windows"].values()))
+        self.assertEqual(windows[0][0], 0)
+        self.assertEqual(windows[-1][1], 4541)
+        self.assertTrue(all(start < end for start, end in windows))
+        self.assertEqual(
+            [left[1] - right[0] for left, right in zip(windows, windows[1:])],
+            [overlap] * 4,
+        )
+
+    def test_overlap10_covers_sequence_and_matches_manifest(self):
+        self._assert_partition_matches_manifest(10)
+
+    def test_overlap50_covers_sequence_and_matches_manifest(self):
+        self._assert_partition_matches_manifest(50)
+
+    def test_default_overlap200_is_unchanged(self):
+        deploy, result = self._read_runner_partition()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        windows = [
+            list(map(int, line.split())) for line in result.stdout.splitlines()
+        ]
+        manifest = json.loads(
+            (deploy / "kitti00_five_robot_overlap200_split.json").read_text()
+        )
+        self.assertEqual(windows, list(manifest["windows"].values()))
+
+    def test_unsupported_overlap_fails_before_runtime_setup(self):
+        _, result = self._read_runner_partition(51)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unsupported five-robot KITTI overlap", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+
+class KittiTenRobotPartitionTest(unittest.TestCase):
+    def _read_partition(self, overlap):
+        deploy = Path(__file__).resolve().parents[1] / "deploy/blackwell_ros2"
+        runner = (deploy / "run_ten_robot_kitti_staged.sh").read_text()
+        configuration = runner.split('RUN_DIR=', 1)[0]
+        environment = dict(os.environ, DPVO_KITTI_SEQUENCE="00")
+        environment.pop("DPVO_KITTI_OVERLAP_FRAMES", None)
+        if overlap is not None:
+            environment["DPVO_KITTI_OVERLAP_FRAMES"] = str(overlap)
+        result = subprocess.run(
+            ["bash", "-s", "--", "stage1"],
+            input=(configuration + '\nfor i in "${!ROBOT_IDS[@]}"; do '
+                   'printf "%s %s\\n" "${STARTS[$i]}" "${ENDS[$i]}"; done\n'),
+            env=environment, text=True, capture_output=True, check=False,
+        )
+        return deploy, result
+
+    def test_overlap10_matches_manifest_and_covers_all_frames(self):
+        deploy, result = self._read_partition(10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        windows = [list(map(int, row.split()))
+                   for row in result.stdout.splitlines()]
+        manifest = json.loads(
+            (deploy / "kitti00_ten_robot_overlap10_split.json").read_text()
+        )
+        self.assertEqual(windows, list(manifest["windows"].values()))
+        self.assertEqual(len(windows), 10)
+        self.assertEqual(windows[0][0], 0)
+        self.assertEqual(windows[-1][1], 4541)
+        self.assertTrue(all(start < end for start, end in windows))
+        self.assertEqual([a[1] - b[0] for a, b in zip(windows, windows[1:])],
+                         [10] * 9)
+
+    def test_existing_overlaps_and_boundary_centres_are_unchanged(self):
+        centres = [454, 908, 1362, 1816, 2270, 2725, 3179, 3633, 4087]
+        for overlap in (10, 50, 200, None):
+            _, result = self._read_partition(overlap)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            windows = [list(map(int, row.split()))
+                       for row in result.stdout.splitlines()]
+            expected_overlap = 200 if overlap is None else overlap
+            self.assertEqual([a[1] - b[0]
+                              for a, b in zip(windows, windows[1:])],
+                             [expected_overlap] * 9)
+            self.assertEqual([(a[1] + b[0]) // 2
+                              for a, b in zip(windows, windows[1:])], centres)
+
+    def test_unsupported_overlap_fails_before_runtime_setup(self):
+        _, result = self._read_partition(11)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unsupported KITTI sequence/overlap", result.stderr)
+        self.assertEqual(result.stdout, "")
 
 
 def _poses(count, step=1.0):
@@ -190,6 +312,43 @@ class OfflineDpgoBoundaryTest(unittest.TestCase):
         self.assertEqual(args.anchor_block_iterations, 20)
         self.assertEqual(args.target_hellinger, 0.1)
         self.assertTrue(args.hellinger_quadratic_term)
+        self.assertFalse(args.rerun_factor_graphs)
+        self.assertTrue(args.bootstrap_robot_anchors)
+        self.assertTrue(args.run_cbs)
+
+    def test_centralized_only_command_preserves_default_global_initialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "solver"
+            executable.touch()
+            args = _parser().parse_args([
+                "--input-graph", "input.json", "--output-dir", "output",
+                "--cbs-executable", str(executable), "--no-run-cbs",
+            ])
+            command = build_command(args, root / "input.json", root / "output")
+            self.assertIn("--run_cbs=false", command)
+            self.assertIn("--bootstrap_robot_anchors=true", command)
+            self.assertIn("--run_centralized=true", command)
+            self.assertIn("--run_explicit_anchor_centralized=true", command)
+
+    def test_random_stage_factor_graph_recording_is_explicit(self):
+        args = _parser().parse_args(
+            [
+                "--input-graph", "input.json",
+                "--output-dir", "output",
+                "--cbs-executable", "cbs_dpvo_sim3_offline",
+                "--stage-mode", "random",
+                "--anchor-stage-probability", "0.5",
+                "--rerun-factor-graphs",
+                "--rerun-iteration-stride", "1",
+                "--no-bootstrap-robot-anchors",
+            ]
+        )
+        self.assertEqual(args.stage_mode, "random")
+        self.assertEqual(args.anchor_stage_probability, 0.5)
+        self.assertEqual(args.rerun_iteration_stride, 1)
+        self.assertTrue(args.rerun_factor_graphs)
+        self.assertFalse(args.bootstrap_robot_anchors)
 
     def test_no_covariance_transport_baseline_is_explicit(self):
         args = _parser().parse_args(
@@ -288,6 +447,8 @@ class OfflineDpgoBoundaryTest(unittest.TestCase):
                 centralized_max_iterations=300,
                 write_rerun_rrd=True,
                 rerun_iteration_stride=1,
+                rerun_factor_graphs=True,
+                trajectory_snapshot_iterations="0,50,100",
                 rerun_stream=False,
                 rerun_url="rerun+http://127.0.0.1:9876/proxy",
                 allow_legacy_unoptimized_input=False,
@@ -305,6 +466,26 @@ class OfflineDpgoBoundaryTest(unittest.TestCase):
             self.assertIn("--sim3_covariance_transport=bernoulli", command)
             self.assertIn("--bootstrap_robot_anchors=false", command)
             self.assertIn("--rerun_iteration_stride=1", command)
+            self.assertIn("--rerun_factor_graphs=true", command)
+            self.assertFalse(any(flag.startswith("--pose_beliefs_only=")
+                                 for flag in command))
+            args.pose_beliefs_only = True
+            self.assertIn(
+                "--pose_beliefs_only=true",
+                build_command(args, root / "input.json", root / "output"),
+            )
+            args.pose_beliefs_only = False
+            args.rerun_factor_graphs = False
+            self.assertFalse(
+                any(
+                    flag.startswith("--rerun_factor_graphs=")
+                    for flag in build_command(args, root / "input.json", root / "output")
+                )
+            )
+            args.rerun_factor_graphs = True
+            self.assertIn(
+                "--trajectory_snapshot_iterations=0,50,100", command
+            )
 
             source = root / "verified.json"
             write_json(_verified_graph(), source)
@@ -320,6 +501,77 @@ class OfflineDpgoBoundaryTest(unittest.TestCase):
                 provenance["copied_input_sha256"],
             )
             self.assertTrue(provenance["copied_input_is_byte_identical"])
+
+
+@unittest.skipUnless(
+    os.environ.get("DPVO_CBS_TEST_EXECUTABLE"),
+    "set DPVO_CBS_TEST_EXECUTABLE to run the compiled offline solver regression",
+)
+class OfflineCentralizedInitializationTest(unittest.TestCase):
+    def test_global_initialization_default_never_changes_cbs_states(self):
+        executable = str(Path(os.environ["DPVO_CBS_TEST_EXECUTABLE"]).resolve())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph = _verified_graph()
+            graph.edges[0].measurement = Sim3([-4., 1., -2.], np.eye(3), 1.3)
+            graph.edges[1].measurement = Sim3([-3., 2., 1.], np.eye(3), 0.85)
+            # Use non-gauge keyframes as separators: first poses are fixed
+            # local chart roots and do not provide outgoing pose beliefs.
+            for edge in graph.edges:
+                edge.source += 3
+                edge.target += 3
+            # Each receiving robot must own the corresponding remote copy,
+            # as in the production verified graph's directed loop factors.
+            for edge in list(graph.edges):
+                graph.edges.append(PoseGraphEdge(
+                    edge_id=len(graph.edges), source=edge.target, target=edge.source,
+                    measurement=edge.measurement.inverse(),
+                    information_diagonal=np.ones(7), edge_type="inter_robot_loop_closure",
+                ))
+            for robot in range(3):
+                pose = Sim3([1. + robot, 0.1, 2.], np.eye(3))
+                graph.vertices.append(PoseGraphVertex(
+                    vertex_id=robot + 3, robot_id=f"robot{robot}",
+                    session_id=f"robot{robot}_tracking", keyframe_id=1, estimate=pose,
+                ))
+                graph.edges.append(PoseGraphEdge(
+                    edge_id=len(graph.edges), source=robot, target=robot + 3,
+                    measurement=pose.inverse(), information_diagonal=np.ones(7),
+                    edge_type="visual_odometry",
+                ))
+            source = root / "graph.json"
+            write_json(graph, source)
+            for graph_only in (False, True):
+                outputs = []
+                for use_default in (True, False):
+                    output = root / f"graph_only_{graph_only}_default_{use_default}"
+                    command = [
+                        executable, f"--input_graph={source}", f"--output_dir={output}",
+                        "--iterations=20", "--stage_mode=fixed",
+                        f"--anchor_start_iteration={1 if graph_only else 2}",
+                        "--pose_warmup_iterations=0", f"--pose_beliefs_only={str(graph_only).lower()}",
+                        "--trajectory_snapshot_iterations=0,1,2,20", "--write_rerun_rrd=false",
+                        "--centralized_max_iterations=5", "--random_seed=42", "--d_reset=1.1",
+                    ]
+                    if not use_default:
+                        command.append("--bootstrap_robot_anchors=false")
+                    result = subprocess.run(command, text=True, capture_output=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    outputs.append(output)
+                    if use_default:
+                        self.assertIn("Centralized robot-anchor initialization: inter-robot spanning tree", result.stdout)
+                    if graph_only:
+                        with (output / "cbs_pose_belief_initialization.csv").open() as handle:
+                            audit = list(csv.DictReader(handle))
+                        self.assertTrue(audit)
+                        self.assertTrue(all(float(row["max_pose_matrix_change"]) == 0. for row in audit))
+                initialized, identity = outputs
+                self.assertNotEqual(
+                    (initialized / "bootstrap_initial.csv").read_bytes(),
+                    (identity / "bootstrap_initial.csv").read_bytes(),
+                )
+                for name in ["cbs.csv", "cbs_anchors.csv"] + [f"cbs_iteration_{i}.csv" for i in (0, 1, 2, 20)]:
+                    self.assertEqual((initialized / name).read_bytes(), (identity / name).read_bytes(), name)
 
 
 if __name__ == "__main__":

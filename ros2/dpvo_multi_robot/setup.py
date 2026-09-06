@@ -34,6 +34,7 @@ setup(
             "dpvo_newer_college_player = dpvo_multi_robot.bootstrap:newer_college_player_main",
             "dpvo_cu_multi_player = dpvo_multi_robot.bootstrap:cu_multi_player_main",
             "dpvo_s3e_player = dpvo_multi_robot.bootstrap:s3e_player_main",
+            "dpvo_scalemaster_player = dpvo_multi_robot.bootstrap:scalemaster_player_main",
         ],
     },
 )

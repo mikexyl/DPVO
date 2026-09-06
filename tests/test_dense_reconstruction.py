@@ -12,6 +12,7 @@ from dpvo.loop_closure.dense_reconstruction import (
     CACHE_FORMAT_NAME,
     CACHE_FORMAT_VERSION,
     INFERENCE_MODE,
+    RAW_DPVO_INFERENCE_MODE,
     CbsPose,
     FrameKey,
     FusionSettings,
@@ -35,11 +36,13 @@ from dpvo.loop_closure.dense_reconstruction import (
     pair_scale_diagnostics,
     recover_dpvo_patch_observations,
     recover_full_resolution_intrinsics,
+    raw_dpvo_poses_from_tracking,
     refine_prediction_scale_from_dpvo_keypoints,
     reprojection_consistency_mask,
     save_pair_cache,
     scale_prediction_to_cbs,
     validate_inputs,
+    validate_raw_dpvo_inputs,
     voxel_fuse,
 )
 from dpvo.loop_closure.pose_graph import (
@@ -69,6 +72,10 @@ def _artifact(robot_id, count, root=None):
 
     class Artifact:
         keyframe_count = count
+        keyframe_poses_xyzw = np.asarray(
+            [[float(index), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0] for index in range(count)],
+            dtype=np.float32,
+        )
         internal_intrinsics = np.tile(
             np.asarray([1.0, 1.0, 0.5, 0.5], dtype=np.float32), (count, 1)
         )
@@ -382,6 +389,36 @@ class InputValidationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing columns"):
                 load_cbs_csv(path)
 
+    def test_raw_dpvo_poses_come_directly_from_unoptimized_tracking(self):
+        artifact = _artifact("robot0", 2)
+        vertices = [
+            PoseGraphVertex(
+                index,
+                "robot0",
+                artifact.session_id,
+                Sim3.from_pose(artifact.keyframe_poses_xyzw[index]),
+                keyframe_id=index,
+            )
+            for index in range(2)
+        ]
+        graph = _graph(vertices)
+        graph.metadata = {
+            "pipeline_stage": "tracking",
+            "contains_inter_robot_constraints": False,
+            "contains_global_optimization": False,
+        }
+        artifacts = {"robot0": artifact}
+        validate_raw_dpvo_inputs(artifacts, graph)
+        poses = raw_dpvo_poses_from_tracking(artifacts, graph)
+        second = poses[FrameKey("robot0", artifact.session_id, 1)]
+        np.testing.assert_allclose(second.camera_center, [1.0, 0.0, 0.0])
+        np.testing.assert_allclose(second.camera_from_world[:3, 3], [-1.0, 0.0, 0.0])
+        self.assertEqual(second.scale, 1.0)
+
+        graph.metadata["contains_inter_robot_constraints"] = True
+        with self.assertRaisesRegex(ValueError, "inter-robot constraints"):
+            validate_raw_dpvo_inputs(artifacts, graph)
+
 
 class CacheTest(unittest.TestCase):
     def setUp(self):
@@ -483,6 +520,31 @@ class CacheTest(unittest.TestCase):
         old_provenance["cache_format"] = "dpvo_cbs_da3_pair_cache"
         old_provenance["cache_version"] = 1
         self.assertIsNone(load_pair_cache(path, old_provenance))
+
+    def test_raw_dpvo_cache_provenance_is_distinct_and_loadable(self):
+        raw_settings = replace(
+            self.settings,
+            inference_mode=RAW_DPVO_INFERENCE_MODE,
+        )
+        raw_provenance = pair_provenance(
+            self.job, self.artifacts, self.poses, raw_settings
+        )
+        cbs_provenance = pair_provenance(
+            self.job, self.artifacts, self.poses, self.settings
+        )
+        self.assertNotEqual(raw_provenance["fingerprint"], cbs_provenance["fingerprint"])
+        self.assertEqual(
+            raw_provenance["inference"]["inference_mode"],
+            RAW_DPVO_INFERENCE_MODE,
+        )
+        self.assertIn("raw_dpvo_pose_scale", raw_provenance["views"][0])
+        self.assertNotIn("cbs_vertex_scale_diagnostic", raw_provenance["views"][0])
+        path = pair_cache_path(self.root, self.job)
+        save_pair_cache(
+            path, self.prediction, self.job, raw_provenance, self.diagnostics
+        )
+        self.assertIsNotNone(load_pair_cache(path, raw_provenance))
+        self.assertIsNone(load_pair_cache(path, cbs_provenance))
 
     def test_corrupt_cache_is_not_resumed(self):
         path = pair_cache_path(self.root, self.job)

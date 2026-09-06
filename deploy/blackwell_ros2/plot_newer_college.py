@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot Newer College raw/centralized/CBS trajectories and verified loops."""
+"""Plot raw/centralized/CBS trajectories and verified loops."""
 
 from __future__ import annotations
 
@@ -32,6 +32,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dataset-label", default="Newer College")
     parser.add_argument("--output-prefix", default="newer_college")
+    parser.add_argument(
+        "--alignment-mode",
+        choices=("joint-evo", "solver-frame"),
+        default="joint-evo",
+        help=(
+            "joint-evo overlays a shared ground-truth frame; solver-frame plots "
+            "solutions directly when no joint ground truth exists"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -110,6 +119,24 @@ def transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
     return points @ transform[:3, :3].T + transform[:3, 3]
 
 
+def prepare_method_positions(
+    csv_path: Path,
+    evo_dir: Path,
+    method: str,
+    alignment_mode: str,
+) -> tuple[dict[int, np.ndarray], float | None]:
+    positions = read_csv(csv_path)
+    if alignment_mode == "solver-frame":
+        return positions, None
+    if alignment_mode != "joint-evo":
+        raise ValueError(f"unknown alignment mode: {alignment_mode}")
+    rmse, transform = load_evo(evo_dir / "results" / f"{method}_joint.zip")
+    return {
+        vertex: transform_points(point[None], transform)[0]
+        for vertex, point in positions.items()
+    }, rmse
+
+
 def pca_projection(positions: dict[int, np.ndarray]):
     points = np.vstack(list(positions.values()))
     center = points.mean(axis=0)
@@ -157,18 +184,20 @@ def main() -> None:
     )
     aligned = {}
     metrics = {}
-    groundtruth = {
-        robot: read_tum(args.evo_dir / f"groundtruth_{robot}.tum")["positions"]
-        for robot in robots
-    }
-    for method, _title, csv_path in method_specs:
-        method_positions = read_csv(csv_path)
-        rmse, transform = load_evo(args.evo_dir / "results" / f"{method}_joint.zip")
-        aligned[method] = {
-            vertex: transform_points(point[None], transform)[0]
-            for vertex, point in method_positions.items()
+    groundtruth = (
+        {
+            robot: read_tum(args.evo_dir / f"groundtruth_{robot}.tum")["positions"]
+            for robot in robots
         }
-        metrics[method] = rmse
+        if args.alignment_mode == "joint-evo"
+        else {}
+    )
+    for method, _title, csv_path in method_specs:
+        aligned[method], rmse = prepare_method_positions(
+            csv_path, args.evo_dir, method, args.alignment_mode
+        )
+        if rmse is not None:
+            metrics[method] = rmse
 
     figure, axes = plt.subplots(1, 3, figsize=(10.2, 3.0), constrained_layout=True)
 
@@ -196,15 +225,17 @@ def main() -> None:
         method_positions = aligned[method]
         method_groups = []
         for robot in robots:
-            truth = groundtruth[robot][:, :2]
             trajectory = np.vstack(
                 [method_positions[vertex][:2] for vertex in order[robot]]
             )
-            method_groups.extend((truth, trajectory))
-            axis.plot(
-                truth[:, 0], truth[:, 1], color=COLORS[robot], linewidth=1.0,
-                linestyle=(0, (2.5, 1.7)), alpha=0.48,
-            )
+            method_groups.append(trajectory)
+            if args.alignment_mode == "joint-evo":
+                truth = groundtruth[robot][:, :2]
+                method_groups.append(truth)
+                axis.plot(
+                    truth[:, 0], truth[:, 1], color=COLORS[robot], linewidth=1.0,
+                    linestyle=(0, (2.5, 1.7)), alpha=0.48,
+                )
             axis.plot(trajectory[:, 0], trajectory[:, 1], color=COLORS[robot], linewidth=1.15)
             axis.scatter(
                 trajectory[0, 0], trajectory[0, 1], s=14,
@@ -214,35 +245,52 @@ def main() -> None:
             segment = np.vstack((method_positions[source], method_positions[target]))[:, :2]
             axis.plot(segment[:, 0], segment[:, 1], color="#AA3377", linewidth=0.8, alpha=0.72)
         lower, upper = bounds(method_groups)
-        axis.set_title(
-            f"({chr(ord('a') + panel)}) {title}\nJoint ATE {metrics[method]:.3f} m"
+        panel_title = f"({chr(ord('a') + panel)}) {title}"
+        if args.alignment_mode == "joint-evo":
+            panel_title += f"\nJoint ATE {metrics[method]:.3f} m"
+        axis.set_title(panel_title)
+        frame_label = (
+            f"{args.dataset_label} world"
+            if args.alignment_mode == "joint-evo"
+            else f"{args.dataset_label} solver frame"
         )
-        axis.set_xlabel(f"{args.dataset_label} world x [m]")
+        unit = "m" if args.alignment_mode == "joint-evo" else "local-map units"
+        axis.set_xlabel(f"{frame_label} x [{unit}]")
         if panel == 1:
-            axis.set_ylabel(f"{args.dataset_label} world y [m]")
+            axis.set_ylabel(f"{frame_label} y [{unit}]")
         axis.set_xlim(lower[0], upper[0])
         axis.set_ylim(lower[1], upper[1])
 
     for axis in axes:
         axis.set_aspect("equal", adjustable="box")
         axis.grid(True, color="#D9D9D9", linewidth=0.4, alpha=0.65)
-    figure.legend(
-        handles=[
-            *[
-                Line2D([0], [0], color=COLORS[robot], linewidth=1.6, label=robot.upper())
-                for robot in robots
-            ],
-            Line2D([0], [0], color="#444444", linewidth=1.3, label="estimate"),
+    legend_handles = [
+        *[
+            Line2D(
+                [0], [0], color=COLORS[robot], linewidth=1.6, label=robot.upper()
+            )
+            for robot in robots
+        ],
+        Line2D([0], [0], color="#444444", linewidth=1.3, label="estimate"),
+    ]
+    if args.alignment_mode == "joint-evo":
+        legend_handles.append(
             Line2D(
                 [0], [0], color="#444444", linewidth=1.0,
                 linestyle=(0, (2.5, 1.7)), alpha=0.55,
                 label="cam0 ground truth (optimized panels only)",
-            ),
-            Line2D([0], [0], color="#AA3377", linewidth=0.8, label="verified loop"),
-        ],
+            )
+        )
+    legend_handles.append(
+        Line2D(
+            [0], [0], color="#AA3377", linewidth=0.8, label="verified loop"
+        ),
+    )
+    figure.legend(
+        handles=legend_handles,
         loc="upper center",
         bbox_to_anchor=(0.5, 1.08),
-        ncol=len(robots) + 3,
+        ncol=len(legend_handles),
         frameon=False,
     )
     outputs = {}
@@ -257,13 +305,14 @@ def main() -> None:
         "graph": str(args.graph.resolve()),
         "robots": list(robots),
         "inter_robot_loops": len(loops),
+        "alignment_mode": args.alignment_mode,
         "raw_panel": {
             "groundtruth_overlay": False,
             "ate_reported": False,
             "projection_center": pca_center.tolist(),
             "projection_basis_columns": pca_basis.tolist(),
         },
-        "optimized_joint_ate_rmse_m": metrics,
+        "optimized_joint_ate_rmse_m": metrics if metrics else None,
         "outputs": outputs,
     }
     (args.output_dir / f"{args.output_prefix}_trajectories_loops_trace.json").write_text(

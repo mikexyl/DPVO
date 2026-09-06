@@ -109,15 +109,22 @@ def build_command(args, input_graph: Path, output_dir: Path):
         "inter_loop_scale_sigma": args.inter_loop_scale_sigma,
         "random_seed": args.random_seed,
         "huber_k": args.huber_k,
-        "run_cbs": "true",
+        "run_cbs": str(getattr(args, "run_cbs", True)).lower(),
         "run_centralized": "true",
         "run_explicit_anchor_centralized": "true",
         "centralized_max_iterations": args.centralized_max_iterations,
         "write_rerun_rrd": str(args.write_rerun_rrd).lower(),
         "rerun_iteration_stride": args.rerun_iteration_stride,
+        "trajectory_snapshot_iterations": args.trajectory_snapshot_iterations,
         "rerun_stream": str(args.rerun_stream).lower(),
         "rerun_url": args.rerun_url,
     }
+    # Preserve replay compatibility with archived solvers when this optional
+    # recording feature is not requested.
+    if getattr(args, "rerun_factor_graphs", False):
+        values["rerun_factor_graphs"] = "true"
+    if getattr(args, "pose_beliefs_only", False):
+        values["pose_beliefs_only"] = "true"
     return [str(executable)] + [f"--{key}={value}" for key, value in values.items()]
 
 
@@ -178,6 +185,14 @@ def _parser():
         default="alternating",
     )
     parser.add_argument("--anchor-start-iteration", type=int, default=30)
+    parser.add_argument(
+        "--pose-beliefs-only",
+        action="store_true",
+        help=(
+            "fixed-stage ablation: initialize and exchange pose beliefs without "
+            "optimization; start ordinary CBS only at the anchor stage"
+        ),
+    )
     parser.add_argument("--anchor-stage-probability", type=float, default=0.5)
     parser.add_argument("--pose-warmup-iterations", type=int, default=0)
     parser.add_argument("--pose-block-iterations", type=int, default=20)
@@ -200,8 +215,15 @@ def _parser():
     parser.add_argument(
         "--bootstrap-robot-anchors",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="opt in to centralized spanning-tree robot-anchor initialization",
+        default=True,
+        help=(
+            "initialize centralized solvers with a global inter-robot spanning "
+            "tree (default); never changes CBS's local-chart initialization"
+        ),
+    )
+    parser.add_argument(
+        "--run-cbs", action=argparse.BooleanOptionalAction, default=True,
+        help="run CBS as well as the centralized baselines; --no-run-cbs reruns only centralized",
     )
     parser.add_argument(
         "--allow-legacy-unoptimized-input",
@@ -219,6 +241,17 @@ def _parser():
     parser.add_argument("--centralized-max-iterations", type=int, default=300)
     parser.add_argument("--write-rerun-rrd", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--rerun-iteration-stride", type=int, default=10)
+    parser.add_argument(
+        "--rerun-factor-graphs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="record each robot's live optimizer factors at every recorded iteration",
+    )
+    parser.add_argument(
+        "--trajectory-snapshot-iterations",
+        default="",
+        help="comma-separated CBS iterations whose trajectories are saved",
+    )
     parser.add_argument("--rerun-stream", action="store_true")
     parser.add_argument(
         "--rerun-url", default="rerun+http://127.0.0.1:9876/proxy"

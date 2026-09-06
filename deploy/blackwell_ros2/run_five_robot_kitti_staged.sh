@@ -14,9 +14,31 @@ DPVO_DEPLOY_ROOT="${DPVO_ROOT:-/data3/dpvo_cbs_ws/src/DPVO}"
 DPVO_DATA_ROOT="${DPVO_KITTI_ROOT:-/data1/mikexyl/datasets/kitti_odometry/dataset}"
 DPVO_VOCAB="${DPVO_ORB_VOCAB:-/data3/mikexyl/datasets/orb_vocab/ORBvoc.txt}"
 DPVO_RESULTS="${DPVO_RESULTS_ROOT:-/data3/mikexyl/results/dpvo_multi_robot}"
-DPVO_RESULT_TAG="${DPVO_OUTPUT_TAG:-kitti00_five_robot_overlap200_staged_full_20260901}"
+DPVO_OVERLAP_FRAMES="${DPVO_KITTI_OVERLAP_FRAMES:-200}"
+DPVO_RESULT_TAG="${DPVO_OUTPUT_TAG:-kitti00_five_robot_overlap${DPVO_OVERLAP_FRAMES}_staged_full_20260901}"
 DPVO_CBS_DEPENDENCY_PREFIX="${DPVO_CBS_DEPENDENCY_PREFIX:-/home/mikexyl/workspaces/sb_slam_ros2/install}"
 DPVO_PIXI_MANIFEST="$DPVO_DEPLOY_ROOT/deploy/blackwell_ros2/pixi.toml"
+
+# Keep the original partition centres; change only the boundary padding.
+# Ranges are half-open raw-frame intervals, before applying DPVO_STRIDE.
+case "$DPVO_OVERLAP_FRAMES" in
+  200)
+    STARTS=(0 808 1716 2625 3533)
+    ENDS=(1008 1916 2825 3733 4541)
+    ;;
+  50)
+    STARTS=(0 883 1791 2700 3608)
+    ENDS=(933 1841 2750 3658 4541)
+    ;;
+  10)
+    STARTS=(0 903 1811 2720 3628)
+    ENDS=(913 1821 2730 3638 4541)
+    ;;
+  *)
+    echo "unsupported five-robot KITTI overlap: $DPVO_OVERLAP_FRAMES (expected 10, 50 or 200)" >&2
+    exit 2
+    ;;
+esac
 
 RUN_DIR="$DPVO_RESULTS/$DPVO_RESULT_TAG"
 ARTIFACT_ROOT="$RUN_DIR/tracking"
@@ -50,7 +72,7 @@ stop_private_mps() {
 trap stop_private_mps EXIT
 
 run_stage1() {
-  echo "[stage1] Sequential DPVO tracking for five overlapping KITTI windows"
+  echo "[stage1] Sequential DPVO tracking for five KITTI windows with ${DPVO_OVERLAP_FRAMES}-frame overlap"
   export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=100
   unset COLCON_CURRENT_PREFIX
   set +u
@@ -59,13 +81,11 @@ run_stage1() {
   set -u
 
   robot_ids=(robot0 robot1 robot2 robot3 robot4)
-  starts=(0 808 1716 2625 3533)
-  ends=(1008 1916 2825 3733 4541)
   mkdir -p "$ARTIFACT_ROOT" "$RUN_DIR/rrd"
   : > "$RUN_DIR/stage1_tracking.log"
   for robot_index in 0 1 2 3 4; do
     robot_id="${robot_ids[$robot_index]}"
-    echo "[stage1] $robot_id [${starts[$robot_index]}, ${ends[$robot_index]})" \
+    echo "[stage1] $robot_id [${STARTS[$robot_index]}, ${ENDS[$robot_index]})" \
       | tee -a "$RUN_DIR/stage1_tracking.log"
     ros2 launch dpvo_multi_robot single_robot_kitti_track.launch.py \
       dataset_root:="$DPVO_DATA_ROOT" \
@@ -73,8 +93,8 @@ run_stage1() {
       image_dir:="${DPVO_KITTI_IMAGE_DIR:-image_0}" \
       calibration_key:="${DPVO_KITTI_CALIBRATION_KEY:-P0}" \
       robot_id:="$robot_id" \
-      start_frame:="${starts[$robot_index]}" \
-      end_frame:="${ends[$robot_index]}" \
+      start_frame:="${STARTS[$robot_index]}" \
+      end_frame:="${ENDS[$robot_index]}" \
       network:="$DPVO_DEPLOY_ROOT/dpvo.pth" \
       config:="$DPVO_DEPLOY_ROOT/config/fast.yaml" \
       orb_vocab:="$DPVO_VOCAB" \

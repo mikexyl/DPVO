@@ -358,6 +358,50 @@ def robot_sort_key(robot_id: str):
     return (0, int(suffix)) if suffix.isdigit() else (1, robot_id)
 
 
+def robot_components(adjacency: dict[str, set[str]]) -> list[list[str]]:
+    components = []
+    unseen = set(adjacency)
+    while unseen:
+        root = min(unseen, key=robot_sort_key)
+        reached = set()
+        frontier = [root]
+        while frontier:
+            robot = frontier.pop()
+            if robot in reached:
+                continue
+            reached.add(robot)
+            frontier.extend(adjacency[robot] - reached)
+        unseen -= reached
+        components.append(sorted(reached, key=robot_sort_key))
+    return sorted(components, key=lambda component: robot_sort_key(component[0]))
+
+
+def expected_robot_components(
+    values: list[str], expected_robots: list[str]
+) -> list[list[str]]:
+    if not values:
+        return [sorted(expected_robots, key=robot_sort_key)]
+    components = []
+    flattened = []
+    for value in values:
+        component = [robot.strip() for robot in value.split(",") if robot.strip()]
+        if not component:
+            raise ValueError("--expected-component cannot be empty")
+        if len(set(component)) != len(component):
+            raise ValueError(f"duplicate robot in expected component: {value}")
+        component = sorted(component, key=robot_sort_key)
+        components.append(component)
+        flattened.extend(component)
+    if len(set(flattened)) != len(flattened):
+        raise ValueError("a robot appears in more than one expected component")
+    if set(flattened) != set(expected_robots):
+        raise ValueError(
+            f"expected components cover {sorted(flattened)}, "
+            f"not {sorted(expected_robots)}"
+        )
+    return sorted(components, key=lambda component: robot_sort_key(component[0]))
+
+
 def graph_diagnostics(path: Path, expected_robots: list[str]) -> dict:
     graph = read_json(path)
     robot_by_vertex = {vertex.vertex_id: vertex.robot_id for vertex in graph.vertices}
@@ -377,14 +421,8 @@ def graph_diagnostics(path: Path, expected_robots: list[str]) -> dict:
         adjacency[source_robot].add(target_robot)
         adjacency[target_robot].add(source_robot)
         loop_count += 1
-    reached = set()
-    frontier = [robots[0]] if robots else []
-    while frontier:
-        robot = frontier.pop()
-        if robot in reached:
-            continue
-        reached.add(robot)
-        frontier.extend(adjacency[robot] - reached)
+    components = robot_components(adjacency)
+    reached = set(components[0]) if components else set()
     return {
         "pipeline_stage": graph.metadata.get("pipeline_stage"),
         "input_contains_global_optimization": graph.metadata.get(
@@ -397,6 +435,7 @@ def graph_diagnostics(path: Path, expected_robots: list[str]) -> dict:
         "pair_loop_counts": {
             "--".join(pair): count for pair, count in pair_counts.items()
         },
+        "components": components,
         "connected": reached == set(robots),
         "disconnected": sorted(set(robots) - reached, key=robot_sort_key),
     }
@@ -410,10 +449,13 @@ def check_graph(args) -> None:
             raise ValueError("graph is not a stage-two geometric-verification graph")
         if diagnostics["input_contains_global_optimization"] is not False:
             raise ValueError("graph contains or may contain global optimization")
-        if not diagnostics["connected"]:
+        expected_components = expected_robot_components(
+            args.expected_component, args.robot_ids
+        )
+        if diagnostics["components"] != expected_components:
             raise ValueError(
-                "verified robot graph is disconnected: "
-                + ", ".join(diagnostics["disconnected"])
+                f"verified robot components {diagnostics['components']} do not match "
+                f"expected {expected_components}"
             )
         minimum_pairs = {
             key.replace(":", "--"): int(value)
@@ -426,6 +468,7 @@ def check_graph(args) -> None:
                     f"verified pair {pair} has {actual} loops, requires {minimum}"
                 )
         diagnostics.update(pass_=True, graph=file_record(str(args.graph)))
+        diagnostics["expected_components"] = expected_components
         diagnostics["pass"] = diagnostics.pop("pass_")
     except Exception as error:
         diagnostics = {"pass": False, "error": str(error)}
@@ -676,6 +719,16 @@ def parser() -> argparse.ArgumentParser:
     graph = commands.add_parser("check-graph")
     graph.add_argument("--graph", type=Path, required=True)
     graph.add_argument("--robot-ids", nargs="+", required=True)
+    graph.add_argument(
+        "--expected-component",
+        action="append",
+        default=[],
+        metavar="ROBOT[,ROBOT...]",
+        help=(
+            "expected connected component; repeat for intentionally disconnected "
+            "negative-control components (default: all robots connected)"
+        ),
+    )
     graph.add_argument("--min-pair", action="append", default=[])
     graph.add_argument("--output", type=Path, required=True)
     graph.set_defaults(function=check_graph)

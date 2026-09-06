@@ -76,3 +76,7 @@ def cu_multi_player_main():
 
 def s3e_player_main():
     _exec_module("dpvo_multi_robot.s3e_player")
+
+
+def scalemaster_player_main():
+    _exec_module("dpvo_multi_robot.scalemaster_player")

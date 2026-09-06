@@ -37,9 +37,45 @@ exporter = load_script(
     "newer_college_export_test_module",
     "deploy/blackwell_ros2/export_newer_college_evo_tum.py",
 )
+plotter = load_script(
+    "newer_college_plot_test_module",
+    "deploy/blackwell_ros2/plot_newer_college.py",
+)
+plotter = load_script(
+    "newer_college_plot_test_module",
+    "deploy/blackwell_ros2/plot_newer_college.py",
+)
 
 
 class NewerCollegeStagingTest(unittest.TestCase):
+    def test_solver_frame_plot_mode_does_not_require_evo_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path = root / "solver.csv"
+            csv_path.write_text(
+                "vertex_id,tx,ty,tz\n0,1,2,3\n1,4,5,6\n",
+                encoding="utf-8",
+            )
+            positions, rmse = plotter.prepare_method_positions(
+                csv_path, root / "missing-evo", "cbs", "solver-frame"
+            )
+            self.assertIsNone(rmse)
+            np.testing.assert_allclose(positions[0], [1.0, 2.0, 3.0])
+
+    def test_solver_frame_plot_mode_does_not_require_evo_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path = root / "solver.csv"
+            csv_path.write_text(
+                "vertex_id,tx,ty,tz\n0,1,2,3\n1,4,5,6\n",
+                encoding="utf-8",
+            )
+            positions, rmse = plotter.prepare_method_positions(
+                csv_path, root / "missing-evo", "cbs", "solver-frame"
+            )
+            self.assertIsNone(rmse)
+            np.testing.assert_allclose(positions[0], [1.0, 2.0, 3.0])
+
     def test_manifest_records_inputs_and_pins_tracking_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -144,6 +180,60 @@ class NewerCollegeStagingTest(unittest.TestCase):
             self.assertTrue(diagnostics["connected"])
             self.assertEqual(diagnostics["inter_robot_loop_count"], 3)
             self.assertEqual(diagnostics["pair_loop_counts"]["robot0--robot1"], 2)
+            self.assertEqual(
+                diagnostics["components"], [["robot0", "robot1", "robot2"]]
+            )
+
+    def test_graph_gate_accepts_declared_disconnected_negative_control(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "graph.json"
+            output = root / "gate.json"
+            vertices = [
+                PoseGraphVertex(
+                    vertex_id=index,
+                    robot_id=f"robot{index}",
+                    session_id=f"robot{index}_tracking",
+                    keyframe_id=0,
+                    estimate=Sim3.identity(),
+                    fixed=index in (0, 2),
+                )
+                for index in range(3)
+            ]
+            write_json(
+                Sim3PoseGraph(
+                    name="verified with negative control",
+                    vertices=vertices,
+                    edges=[
+                        PoseGraphEdge(
+                            edge_id=0,
+                            source=0,
+                            target=1,
+                            measurement=Sim3.identity(),
+                            information_diagonal=np.ones(7),
+                            edge_type="inter_robot_loop_closure",
+                        )
+                    ],
+                    metadata={
+                        "pipeline_stage": "geometric_verification",
+                        "input_contains_global_optimization": False,
+                    },
+                ),
+                path,
+            )
+            arguments = Namespace(
+                graph=path,
+                robot_ids=["robot0", "robot1", "robot2"],
+                expected_component=["robot0,robot1", "robot2"],
+                min_pair=["robot0:robot1=1"],
+                output=output,
+            )
+            staged.check_graph(arguments)
+            gate = json.loads(output.read_text(encoding="utf-8"))
+            self.assertTrue(gate["pass"])
+            self.assertEqual(
+                gate["components"], [["robot0", "robot1"], ["robot2"]]
+            )
 
     def test_evo_archive_reports_positive_sim3_scale(self):
         with tempfile.TemporaryDirectory() as directory:

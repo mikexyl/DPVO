@@ -153,6 +153,44 @@ The first two directories include combined and per-robot lossless JSON/g2o
 graphs. `offline_dpgo_provenance.json` records input checksums and the exact CBS
 command.
 
+## ScaleMaster Library staged experiment
+
+The ScaleMaster runner treats `Library_01` and `Library_02` as overlapping robot
+sessions and `Library_03` as a different-place negative control. Stage 2
+therefore requires the robot-level components `[[robot0, robot1], [robot2]]`, at
+least one verified 01--02 loop, and no verified path to 03. Stage 3 optimizes
+only the connected 01/02 component; the 03 trajectory remains an explicitly
+recorded raw passthrough rather than receiving an arbitrary cross-place
+transform. The image-directory player joins RGB images to ARKit timestamps by
+frame ID (the distributed archives can contain one extra odometry row),
+publishes the supplied pinhole intrinsics, and retains the one-frame DPVO
+acknowledgement barrier. The default tracking settings are stride 5 and
+`image_scale=0.5`:
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --base-paths ros2 --symlink-install \
+  --build-base build/ros2-humble --install-base build/ros2-humble-install
+
+DPVO_ORB_VOCAB=/path/to/ORBvoc.txt \
+deploy/blackwell_ros2/run_scalemaster_library_staged.sh all
+```
+
+Inputs default to `/data/scalemaster`; override that with
+`DPVO_SCALEMASTER_SOURCE_ROOT`. Outputs default to
+`results/scalemaster_library_three_staged_stride5_20260903`; override with
+`DPVO_SCALEMASTER_RESULT_ROOT`. `stage1`, `stage2`, `stage3`, `evaluate`, and
+`plot` can be run independently. If `DPVO_SCALEMASTER_STRIDE` is changed, also
+set the three post-stride counts in `DPVO_SCALEMASTER_EXPECTED_FRAMES`.
+
+ScaleMaster is treated as having no ground truth. Its odometry CSV supplies
+playback timestamps only: the pipeline does not compute ATE, use optimized
+odometry as a reference, or draw ground-truth overlays. Evaluation records
+solver diagnostics and CBS-versus-explicit-centralized agreement for the 01/02
+component. The trajectory/loop figure reuses `plot_newer_college.py` in
+`solver-frame` mode, and the sparse map excludes 03 rather than assigning it an
+arbitrary transform into the 01/02 component.
+
 ## Newer College Quad staged experiment
 
 `dpvo_newer_college_player` reads the ROS1

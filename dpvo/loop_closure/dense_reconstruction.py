@@ -34,9 +34,15 @@ from .tracking_artifact import TrackingArtifact, load_artifact_root
 
 FORMAT_NAME = "dpvo_cbs_da3_dense_map"
 FORMAT_VERSION = 4
+RAW_DPVO_FORMAT_NAME = "dpvo_raw_dpvo_da3_dense_map"
+RAW_DPVO_FORMAT_VERSION = 1
 CACHE_FORMAT_NAME = "dpvo_cbs_da3_pose_estimated_baseline_scaled_pair_cache"
 CACHE_FORMAT_VERSION = 2
 INFERENCE_MODE = "da3_pose_estimated_cbs_baseline_scaled_v1"
+RAW_DPVO_INFERENCE_MODE = "da3_pose_estimated_raw_dpvo_baseline_scaled_v1"
+SUPPORTED_INFERENCE_MODES = {INFERENCE_MODE, RAW_DPVO_INFERENCE_MODE}
+CBS_TRAJECTORY_SOURCE = "cbs_sim3_solver_output"
+RAW_DPVO_TRAJECTORY_SOURCE = "raw_dpvo_tracking_artifact"
 DEFAULT_MODEL = "depth-anything/DA3-LARGE"
 DEFAULT_CODE_REVISION = "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4"
 DEFAULT_WEIGHTS_REVISION = "c54c26b16ec04d218e8d584ecf4bce082a9fcc20"
@@ -137,7 +143,7 @@ class InferenceSettings:
     use_ray_pose: bool = False
 
     def validate(self) -> "InferenceSettings":
-        if self.inference_mode != INFERENCE_MODE:
+        if self.inference_mode not in SUPPORTED_INFERENCE_MODES:
             raise ValueError(f"unsupported dense inference mode: {self.inference_mode!r}")
         if self.pose_estimation != "camera_decoder":
             raise ValueError("corrected dense inference requires DA3 camera-decoder pose estimation")
@@ -185,6 +191,7 @@ class FusionSettings:
     dpvo_keypoint_mad_multiplier: float = 3.0
     pixel_stride: int = 4
     voxel_size: float = 0.02
+    cross_robot_voxel_fusion: bool = True
 
     def validate(self) -> "FusionSettings":
         if not 0.0 <= self.confidence_percentile <= 100.0:
@@ -219,6 +226,8 @@ class FusionSettings:
             raise ValueError("pixel stride must be at least one")
         if not np.isfinite(self.voxel_size) or self.voxel_size <= 0.0:
             raise ValueError("voxel size must be finite and positive")
+        if not isinstance(self.cross_robot_voxel_fusion, (bool, np.bool_)):
+            raise ValueError("cross-robot voxel fusion must be boolean")
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -235,6 +244,7 @@ class FusionSettings:
             "dpvo_keypoint_mad_multiplier": self.dpvo_keypoint_mad_multiplier,
             "pixel_stride": self.pixel_stride,
             "voxel_size_cbs_units": self.voxel_size,
+            "cross_robot_voxel_fusion": bool(self.cross_robot_voxel_fusion),
         }
 
 
@@ -644,6 +654,82 @@ def validate_inputs(
             )
 
 
+def validate_raw_dpvo_inputs(
+    artifacts: dict[str, TrackingArtifact],
+    graph: Sim3PoseGraph,
+) -> None:
+    """Validate a solver-free graph against the raw DPVO tracking artifacts."""
+
+    if graph.metadata.get("pipeline_stage") != "tracking":
+        raise ValueError(
+            "raw DPVO reconstruction requires a tracking-stage pose graph "
+            f"(pipeline_stage={graph.metadata.get('pipeline_stage')!r})"
+        )
+    if graph.metadata.get("contains_inter_robot_constraints", True):
+        raise ValueError("raw DPVO graph contains inter-robot constraints")
+    if graph.metadata.get("contains_global_optimization", True):
+        raise ValueError("raw DPVO graph contains global optimization")
+    if any(vertex.optimized_estimate is not None for vertex in graph.vertices):
+        raise ValueError("raw DPVO graph contains optimized vertex estimates")
+    if any(edge.edge_type == "inter_robot_loop_closure" for edge in graph.edges):
+        raise ValueError("raw DPVO graph contains inter-robot loop closures")
+
+    graph_by_key = {_frame_key_from_vertex(vertex): vertex for vertex in graph.vertices}
+    if len(graph_by_key) != len(graph.vertices):
+        raise ValueError("raw DPVO graph contains duplicate frame identities")
+    artifact_keys = {
+        FrameKey(robot_id, artifact.session_id, keyframe_id)
+        for robot_id, artifact in artifacts.items()
+        for keyframe_id in range(artifact.keyframe_count)
+    }
+    if set(graph_by_key) != artifact_keys:
+        missing = sorted(artifact_keys - set(graph_by_key))[:3]
+        extra = sorted(set(graph_by_key) - artifact_keys)[:3]
+        raise ValueError(
+            "raw DPVO graph/tracking keyframe mismatch: "
+            f"missing={len(artifact_keys - set(graph_by_key))} {missing}, "
+            f"extra={len(set(graph_by_key) - artifact_keys)} {extra}"
+        )
+
+    for key, vertex in graph_by_key.items():
+        artifact_pose = Sim3.from_pose(
+            artifacts[key.robot_id].keyframe_poses_xyzw[key.keyframe_id]
+        )
+        if (
+            not np.allclose(vertex.estimate.translation, artifact_pose.translation, atol=1e-6)
+            or not np.allclose(vertex.estimate.rotation, artifact_pose.rotation, atol=1e-6)
+            or not np.isclose(vertex.estimate.scale, 1.0, atol=1e-12)
+        ):
+            raise ValueError(
+                f"raw tracking graph pose differs from the DPVO artifact for {key.label()}"
+            )
+
+
+def raw_dpvo_poses_from_tracking(
+    artifacts: dict[str, TrackingArtifact],
+    graph: Sim3PoseGraph,
+) -> dict[FrameKey, CbsPose]:
+    """Create rigid poses directly from independent raw DPVO trajectories."""
+
+    validate_raw_dpvo_inputs(artifacts, graph)
+    poses: dict[FrameKey, CbsPose] = {}
+    for vertex in graph.vertices:
+        key = _frame_key_from_vertex(vertex)
+        raw_pose = Sim3.from_pose(
+            artifacts[key.robot_id].keyframe_poses_xyzw[key.keyframe_id]
+        )
+        rigid_world_to_camera = cbs_sim3_to_rigid_w2c(raw_pose)
+        poses[key] = CbsPose(
+            vertex_id=vertex.vertex_id,
+            key=key,
+            camera_from_world=rigid_world_to_camera,
+            camera_center=raw_pose.translation.copy(),
+            rotation_camera_to_world=rigid_world_to_camera[:3, :3].T.copy(),
+            scale=1.0,
+        )
+    return poses
+
+
 def _baseline(first: FrameKey, second: FrameKey, poses: dict[FrameKey, CbsPose]) -> float:
     return float(np.linalg.norm(poses[first].camera_center - poses[second].camera_center))
 
@@ -816,16 +902,18 @@ def pair_provenance(
     for key in job.views:
         image_path, intrinsics = frame_path_and_intrinsics(key, artifacts)
         pose = cbs_poses[key]
-        views.append(
-            {
-                **key.to_dict(),
-                "image": str(image_path.resolve()),
-                "image_sha256": sha256_file(image_path),
-                "intrinsics": intrinsics.tolist(),
-                "rigid_world_to_camera": pose.camera_from_world.tolist(),
-                "cbs_vertex_scale_diagnostic": pose.scale,
-            }
-        )
+        view = {
+            **key.to_dict(),
+            "image": str(image_path.resolve()),
+            "image_sha256": sha256_file(image_path),
+            "intrinsics": intrinsics.tolist(),
+            "rigid_world_to_camera": pose.camera_from_world.tolist(),
+        }
+        if settings.inference_mode == RAW_DPVO_INFERENCE_MODE:
+            view["raw_dpvo_pose_scale"] = pose.scale
+        else:
+            view["cbs_vertex_scale_diagnostic"] = pose.scale
+        views.append(view)
     value = {
         "cache_format": CACHE_FORMAT_NAME,
         "cache_version": CACHE_FORMAT_VERSION,
@@ -889,7 +977,8 @@ def load_pair_cache(
             if (
                 provenance.get("cache_format") != CACHE_FORMAT_NAME
                 or provenance.get("cache_version") != CACHE_FORMAT_VERSION
-                or provenance.get("inference", {}).get("inference_mode") != INFERENCE_MODE
+                or provenance.get("inference", {}).get("inference_mode")
+                not in SUPPORTED_INFERENCE_MODES
             ):
                 return None
             diagnostics = json.loads(str(cache["pair_diagnostics"].item()))
@@ -985,7 +1074,7 @@ class Da3Backend:
             "requested_weights_revision": settings.weights_revision,
             "resolved_weights_revision": getattr(self.model, "_commit_hash", None),
             "package_version": package_version,
-            "inference_mode": INFERENCE_MODE,
+            "inference_mode": settings.inference_mode,
             "pose_conditioning": "no_input_extrinsics",
             "pose_estimation": "camera_decoder",
             "da3_output_extrinsics_convention": "world_to_camera",
@@ -1118,7 +1207,7 @@ def save_pair_failure(
         {
             "cache_format": CACHE_FORMAT_NAME,
             "cache_version": CACHE_FORMAT_VERSION,
-            "inference_mode": INFERENCE_MODE,
+            "inference_mode": provenance.get("inference", {}).get("inference_mode"),
             "job": job.to_dict(),
             "provenance_fingerprint": provenance["fingerprint"],
             "diagnostics": diagnostics,
@@ -1693,12 +1782,17 @@ def fuse_cached_jobs(
             "points_after_robot_voxel_fusion": len(fused.points),
         }
     global_input = concatenate_batches(per_robot)
-    global_cloud = voxel_fuse(global_input, fusion_settings.voxel_size)
+    global_cloud = (
+        voxel_fuse(global_input, fusion_settings.voxel_size)
+        if fusion_settings.cross_robot_voxel_fusion
+        else global_input
+    )
     if not len(global_cloud.points):
         raise RuntimeError("filtering and fusion produced an empty dense cloud")
     return global_cloud, {
         "pairs": pair_stats,
         "robots": robot_stats,
+        "cross_robot_voxel_fusion": bool(fusion_settings.cross_robot_voxel_fusion),
         "points_after_global_voxel_fusion": len(global_cloud.points),
     }
 
@@ -1791,6 +1885,7 @@ def write_dense_rrd(
     graph: Sim3PoseGraph,
     cbs_poses: dict[FrameKey, CbsPose],
     sparse_path: Path | None = None,
+    trajectory_source: str = CBS_TRAJECTORY_SOURCE,
 ) -> str:
     try:
         import rerun as rr
@@ -1798,17 +1893,24 @@ def write_dense_rrd(
     except ImportError as error:
         raise RuntimeError("rerun-sdk is required to export the dense RRD") from error
 
+    if trajectory_source not in (CBS_TRAJECTORY_SOURCE, RAW_DPVO_TRAJECTORY_SOURCE):
+        raise ValueError(f"unsupported trajectory source: {trajectory_source!r}")
+    raw_dpvo = trajectory_source == RAW_DPVO_TRAJECTORY_SOURCE
+    trajectory_root = "world/raw_dpvo" if raw_dpvo else "world/cbs"
+    trajectory_label = "Raw DPVO" if raw_dpvo else "CBS"
     blueprint = rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(
-                name="CBS DA3 dense RGB",
+                name=f"{trajectory_label} DA3 dense RGB",
                 origin="world",
-                contents=["world/dense/rgb/**", "world/cbs/**", "world/sparse/**"],
+                contents=[
+                    "world/dense/rgb/**", f"{trajectory_root}/**", "world/sparse/**"
+                ],
             ),
             rrb.Spatial3DView(
                 name="Dense robot ownership",
                 origin="world",
-                contents=["world/dense/by_robot/**", "world/cbs/**"],
+                contents=["world/dense/by_robot/**", f"{trajectory_root}/**"],
             ),
         ),
         collapse_panels=True,
@@ -1816,7 +1918,7 @@ def write_dense_rrd(
     path = Path(path)
     recording_id = dense_rrd_recording_id(path)
     rr.init(
-        "DPVO CBS DA3 Dense Map",
+        f"DPVO {trajectory_label} DA3 Dense Map",
         recording_id=recording_id,
         default_blueprint=blueprint,
         strict=True,
@@ -1847,8 +1949,8 @@ def write_dense_rrd(
         )
         trajectory = np.asarray([cbs_poses[key].camera_center for key in keys], dtype=np.float32)
         color = ROBOT_COLORS[robot_index % len(ROBOT_COLORS)]
-        rr.log(f"world/cbs/trajectories/{robot_id}", rr.LineStrips3D([trajectory], colors=color, radii=rr.Radius.ui_points(2.0)), static=True)
-        rr.log(f"world/cbs/keyframes/{robot_id}", rr.Points3D(trajectory, colors=color, radii=rr.Radius.ui_points(1.5)), static=True)
+        rr.log(f"{trajectory_root}/trajectories/{robot_id}", rr.LineStrips3D([trajectory], colors=color, radii=rr.Radius.ui_points(2.0)), static=True)
+        rr.log(f"{trajectory_root}/keyframes/{robot_id}", rr.Points3D(trajectory, colors=color, radii=rr.Radius.ui_points(1.5)), static=True)
     loops = []
     labels = []
     for edge in graph.edges:
@@ -1859,7 +1961,7 @@ def write_dense_rrd(
         loops.append(np.asarray([cbs_poses[source].camera_center, cbs_poses[target].camera_center], dtype=np.float32))
         labels.append(f"{source.robot_id}:{source.keyframe_id} -> {target.robot_id}:{target.keyframe_id}")
     if loops:
-        rr.log("world/cbs/inter_robot_loops", rr.LineStrips3D(loops, colors=[255, 190, 50], labels=labels, radii=rr.Radius.ui_points(2.5)), static=True)
+        rr.log(f"{trajectory_root}/inter_robot_loops", rr.LineStrips3D(loops, colors=[255, 190, 50], labels=labels, radii=rr.Radius.ui_points(2.5)), static=True)
     rr.disconnect()
     return recording_id
 
@@ -1883,6 +1985,7 @@ class ReconstructionPaths:
         cbs_csv: Path | None = None,
         sparse_ply: Path | None = None,
         output_dir: Path | None = None,
+        use_default_sparse: bool = True,
     ) -> "ReconstructionPaths":
         run_dir = Path(run_dir).expanduser().resolve()
         default_sparse = run_dir / "plots" / "cbs_posewise_joint_map.ply"
@@ -1891,7 +1994,9 @@ class ReconstructionPaths:
             Path(tracking_dir).expanduser().resolve() if tracking_dir else run_dir / "tracking",
             Path(graph_path).expanduser().resolve() if graph_path else run_dir / "geometric_verification" / "unoptimized_verified_graph.json",
             Path(cbs_csv).expanduser().resolve() if cbs_csv else run_dir / "dpgo" / "cbs.csv",
-            Path(sparse_ply).expanduser().resolve() if sparse_ply else (default_sparse if default_sparse.is_file() else None),
+            Path(sparse_ply).expanduser().resolve()
+            if sparse_ply
+            else (default_sparse if use_default_sparse and default_sparse.is_file() else None),
             Path(output_dir).expanduser().resolve()
             if output_dir
             else run_dir / "dense_reconstruction" / "da3_two_view_pose_scaled",
@@ -1908,6 +2013,7 @@ class LoadedReconstruction:
     input_checksums: dict[str, Any] = field(default_factory=dict)
     intra_pair_gap: int = 1
     intra_pair_step: int = 2
+    trajectory_source: str = CBS_TRAJECTORY_SOURCE
 
 
 def load_reconstruction(
@@ -1961,6 +2067,55 @@ def load_reconstruction(
     )
 
 
+def load_raw_dpvo_reconstruction(
+    paths: ReconstructionPaths,
+    minimum_baseline: float = 1e-7,
+    intra_pair_gap: int = 1,
+    intra_pair_step: int = 2,
+) -> LoadedReconstruction:
+    """Load solver-free per-robot DPVO trajectories in their original gauges."""
+
+    for required in (paths.tracking_dir, paths.graph_path):
+        if not required.exists():
+            raise FileNotFoundError(f"required reconstruction input does not exist: {required}")
+    artifacts = load_artifact_root(paths.tracking_dir)
+    graph = read_json(paths.graph_path)
+    cbs_poses = raw_dpvo_poses_from_tracking(artifacts, graph)
+    jobs = build_two_view_jobs(
+        artifacts,
+        graph,
+        cbs_poses,
+        minimum_baseline=minimum_baseline,
+        intra_pair_gap=intra_pair_gap,
+        intra_pair_step=intra_pair_step,
+    )
+    if any(job.kind == "inter_robot_loop_closure" for job in jobs):
+        raise ValueError("raw DPVO reconstruction must not schedule inter-robot pairs")
+    return LoadedReconstruction(
+        paths,
+        artifacts,
+        graph,
+        cbs_poses,
+        jobs,
+        {
+            "raw_tracking_graph_sha256": sha256_file(paths.graph_path),
+            "tracking": {
+                robot_id: {
+                    "state_sha256": artifact.manifest["state_sha256"],
+                    "map_sha256": artifact.manifest["map_sha256"],
+                    "keyframe_images_sha256": artifact.manifest["keyframe_images_sha256"],
+                }
+                for robot_id, artifact in sorted(
+                    artifacts.items(), key=lambda item: robot_sort_key(item[0])
+                )
+            },
+        },
+        intra_pair_gap,
+        intra_pair_step,
+        RAW_DPVO_TRAJECTORY_SOURCE,
+    )
+
+
 def build_manifest(
     loaded: LoadedReconstruction,
     selected_jobs: Sequence[PairJob],
@@ -1972,6 +2127,14 @@ def build_manifest(
     model_revisions: dict[str, Any],
 ) -> dict[str, Any]:
     paths = loaded.paths
+    raw_dpvo = loaded.trajectory_source == RAW_DPVO_TRAJECTORY_SOURCE
+    expected_mode = RAW_DPVO_INFERENCE_MODE if raw_dpvo else INFERENCE_MODE
+    if inference_settings.inference_mode != expected_mode:
+        raise ValueError(
+            f"trajectory source {loaded.trajectory_source!r} requires inference mode "
+            f"{expected_mode!r}"
+        )
+    output_stem = "raw_dpvo_da3_dense_map" if raw_dpvo else "cbs_da3_dense_map"
     base_jobs = [job for job in loaded.jobs if job.kind.startswith("intra_robot")]
     loop_jobs = [job for job in loaded.jobs if job.kind == "inter_robot_loop_closure"]
     selected_ids = {job.job_id for job in selected_jobs}
@@ -2017,50 +2180,99 @@ def build_manifest(
             "p95": float(np.percentile(values, 95)),
             "maximum": float(np.max(values)),
         }
+    input_manifest = {
+        "run_dir": str(paths.run_dir),
+        "tracking_dir": str(paths.tracking_dir),
+        "sparse_ply": str(paths.sparse_ply) if paths.sparse_ply else None,
+        "checksums": loaded.input_checksums,
+    }
+    if raw_dpvo:
+        input_manifest["raw_dpvo_tracking_graph"] = str(paths.graph_path)
+        input_manifest["cbs_csv"] = None
+    else:
+        input_manifest["verified_graph"] = str(paths.graph_path)
+        input_manifest["cbs_csv"] = str(paths.cbs_csv)
+    filter_manifest = fusion_settings.to_dict()
+    if raw_dpvo:
+        filter_manifest["voxel_size_raw_dpvo_units"] = filter_manifest.pop(
+            "voxel_size_cbs_units"
+        )
+        for pair in fusion_stats["pairs"].values():
+            diagnostics = pair["scale_and_relative_pose"]
+            diagnostics["raw_dpvo_baseline"] = diagnostics.pop("cbs_baseline")
+            diagnostics["raw_dpvo_pose_scales"] = diagnostics.pop(
+                "cbs_source_sim3_scales"
+            )
+            alignment = diagnostics.get("dpvo_keypoint_alignment")
+            if alignment is not None:
+                for view in alignment["views"]:
+                    view["raw_dpvo_pose_scale"] = view.pop(
+                        "cbs_source_sim3_scale"
+                    )
+
     return {
-        "format": FORMAT_NAME,
-        "version": FORMAT_VERSION,
-        "coordinate_frame": "CBS robot0 frame from per-robot relative anchor estimates (not asserted metric)",
-        "inputs": {
-            "run_dir": str(paths.run_dir),
-            "tracking_dir": str(paths.tracking_dir),
-            "verified_graph": str(paths.graph_path),
-            "cbs_csv": str(paths.cbs_csv),
-            "sparse_ply": str(paths.sparse_ply) if paths.sparse_ply else None,
-            "checksums": loaded.input_checksums,
-        },
+        "format": RAW_DPVO_FORMAT_NAME if raw_dpvo else FORMAT_NAME,
+        "version": RAW_DPVO_FORMAT_VERSION if raw_dpvo else FORMAT_VERSION,
+        "trajectory_source": loaded.trajectory_source,
+        "coordinate_frame": (
+            "independent per-robot raw DPVO local gauges; no inter-robot alignment"
+            if raw_dpvo
+            else "CBS observer gauge from supplied trajectory CSV (not asserted metric)"
+        ),
+        "inputs": input_manifest,
         "outputs": {
-            "ply": str(paths.output_dir / "cbs_da3_dense_map.ply"),
-            "rrd": str(paths.output_dir / "cbs_da3_dense_map.rrd"),
-            "manifest": str(paths.output_dir / "cbs_da3_dense_map.json"),
+            "ply": str(paths.output_dir / f"{output_stem}.ply"),
+            "rrd": str(paths.output_dir / f"{output_stem}.rrd"),
+            "manifest": str(paths.output_dir / f"{output_stem}.json"),
             "pair_cache": str(paths.output_dir / "cache" / "pairs"),
         },
-        "model": {**inference_settings.to_dict(), **model_revisions},
+        "model": {**model_revisions, **inference_settings.to_dict()},
         "scale_handling": {
-            "mode": INFERENCE_MODE,
-            "cbs_pose_projection": (
-                "Sim(3) camera-to-world projected to rigid SE(3), preserving camera centre; "
-                "source scale retained only as diagnostics"
+            "mode": inference_settings.inference_mode,
+            "trajectory_source": loaded.trajectory_source,
+            "pose_projection": (
+                "raw DPVO camera-to-world SE(3) used directly in each robot-local gauge"
+                if raw_dpvo
+                else (
+                    "CBS Sim(3) camera-to-world projected to rigid SE(3), preserving "
+                    "camera centre; source scale retained only as diagnostics"
+                )
             ),
             "da3_pose_source": "camera decoder with no input extrinsics",
             "depth_conversion": (
-                "DA3/CBS baseline scale refined by robust DPVO keypoint depth alignment"
+                (
+                    "DA3/raw-DPVO baseline scale refined by robust DPVO keypoint depth "
+                    "alignment in each independent robot-local gauge"
+                    if raw_dpvo
+                    else "DA3/CBS baseline scale refined by robust DPVO keypoint depth alignment"
+                )
                 if fusion_settings.depth_scale_refinement == "dpvo_keypoints"
-                else "CBS camera baseline divided by DA3 predicted camera baseline"
+                else (
+                    "raw DPVO camera baseline divided by DA3 predicted camera baseline"
+                    if raw_dpvo
+                    else "CBS camera baseline divided by DA3 predicted camera baseline"
+                )
             ),
             "depth_scale_refinement": fusion_settings.depth_scale_refinement,
-            "backprojection_pose_source": "rigid CBS world-to-camera poses",
+            "backprojection_pose_source": (
+                "raw DPVO rigid world-to-camera poses"
+                if raw_dpvo
+                else "rigid CBS world-to-camera poses"
+            ),
+            "cross_robot_voxel_fusion": bool(fusion_settings.cross_robot_voxel_fusion),
             "pair_diagnostics": {
                 "accepted": len(pair_diagnostics),
                 "rejected": int(cache_status.get("rejected", 0)),
                 "applied_depth_scale": distribution(scales),
-                "cbs_baseline": distribution(cbs_baselines),
+                (
+                    "raw_dpvo_baseline" if raw_dpvo else "cbs_baseline"
+                ): distribution(cbs_baselines),
                 "da3_baseline": distribution(da3_baselines),
                 "relative_rotation_error_degrees": distribution(rotation_errors),
                 "translation_direction_error_degrees": distribution(direction_errors),
             },
         },
-        "filters": fusion_settings.to_dict(),
+        "filters": filter_manifest,
         "inventory": {
             "total_keyframes": sum(artifact.keyframe_count for artifact in loaded.artifacts.values()),
             "temporal_sampling": {
@@ -2109,6 +2321,11 @@ def export_reconstruction(
     model_revisions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_dir = loaded.paths.output_dir
+    output_stem = (
+        "raw_dpvo_da3_dense_map"
+        if loaded.trajectory_source == RAW_DPVO_TRAJECTORY_SOURCE
+        else "cbs_da3_dense_map"
+    )
     cache_dir = output_dir / "cache" / "pairs"
     cloud, fusion_stats = fuse_cached_jobs(
         selected_jobs,
@@ -2119,14 +2336,15 @@ def export_reconstruction(
         fusion_settings,
     )
     robot_names = sorted(loaded.artifacts, key=robot_sort_key)
-    write_dense_ply(output_dir / "cbs_da3_dense_map.ply", cloud, robot_names)
+    write_dense_ply(output_dir / f"{output_stem}.ply", cloud, robot_names)
     rrd_recording_id = write_dense_rrd(
-        output_dir / "cbs_da3_dense_map.rrd",
+        output_dir / f"{output_stem}.rrd",
         cloud,
         robot_names,
         loaded.graph,
         loaded.cbs_poses,
         loaded.paths.sparse_ply,
+        loaded.trajectory_source,
     )
     manifest = build_manifest(
         loaded,
@@ -2143,5 +2361,5 @@ def export_reconstruction(
         model_revisions or {},
     )
     manifest["outputs"]["rrd_recording_id"] = rrd_recording_id
-    _atomic_json(output_dir / "cbs_da3_dense_map.json", manifest)
+    _atomic_json(output_dir / f"{output_stem}.json", manifest)
     return manifest

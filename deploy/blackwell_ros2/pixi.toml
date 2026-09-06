@@ -56,6 +56,9 @@ TORCH_CUDA_ARCH_LIST = "12.0"
 MAX_JOBS = "8"
 PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
 
+[activation]
+scripts = ["activate_cbs_runtime.sh"]
+
 [tasks]
 build = { cmd = "python -m pip install --no-build-isolation -e ../.." }
 verify = { cmd = "python -c \"import torch, torch_scatter, cuda_ba, cuda_corr, lietorch_backends; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'device', torch.cuda.get_device_name()); print('capability', torch.cuda.get_device_capability()); print('DPVO extensions: OK')\"", depends-on = ["build"] }

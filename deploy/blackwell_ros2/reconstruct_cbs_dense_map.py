@@ -14,6 +14,8 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from dpvo.loop_closure.dense_reconstruction import (
+    INFERENCE_MODE,
+    RAW_DPVO_INFERENCE_MODE,
     DEFAULT_CODE_REVISION,
     DEFAULT_MODEL,
     DEFAULT_WEIGHTS_REVISION,
@@ -23,6 +25,7 @@ from dpvo.loop_closure.dense_reconstruction import (
     ReconstructionPaths,
     export_reconstruction,
     infer_jobs,
+    load_raw_dpvo_reconstruction,
     load_reconstruction,
 )
 
@@ -30,11 +33,20 @@ from dpvo.loop_closure.dense_reconstruction import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run resumable pose-estimated DA3 two-view inference, convert depth by "
-            "the DA3/CBS baseline ratio, and fuse it in the CBS robot0 frame."
+            "Run resumable pose-estimated DA3 two-view inference and fuse depths "
+            "using either optimized CBS poses or solver-free raw DPVO trajectories."
         )
     )
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument(
+        "--trajectory-source",
+        choices=("cbs", "raw_dpvo"),
+        default="cbs",
+        help=(
+            "Use CBS solver output, or use each tracking artifact's independent raw "
+            "DPVO robot-local trajectory with no inter-robot alignment."
+        ),
+    )
     parser.add_argument("--tracking-dir", type=Path)
     parser.add_argument("--graph", type=Path, dest="graph_path")
     parser.add_argument("--cbs-csv", type=Path)
@@ -78,7 +90,7 @@ def parse_args() -> argparse.Namespace:
         "--voxel-size",
         type=float,
         default=0.02,
-        help="Voxel edge length in CBS robot0-frame units.",
+        help="Voxel edge length in the selected trajectory gauge.",
     )
     parser.add_argument(
         "--minimum-baseline",
@@ -135,15 +147,31 @@ def main() -> int:
     if args.sparse_ply is not None and not args.sparse_ply.expanduser().is_file():
         raise FileNotFoundError(f"--sparse-ply does not exist: {args.sparse_ply}")
 
+    raw_dpvo = args.trajectory_source == "raw_dpvo"
+    if raw_dpvo and args.cbs_csv is not None:
+        raise ValueError("--cbs-csv must not be supplied with --trajectory-source raw_dpvo")
+    if raw_dpvo and args.depth_scale_refinement != "dpvo_keypoints":
+        raise ValueError(
+            "raw DPVO reconstruction requires --depth-scale-refinement dpvo_keypoints"
+        )
+    graph_path = args.graph_path
+    if raw_dpvo and graph_path is None:
+        graph_path = args.run_dir / "tracking" / "unoptimized_tracking_graph.json"
+    output_dir = args.output_dir
+    if raw_dpvo and output_dir is None:
+        output_dir = args.run_dir / "dense_reconstruction" / "raw_dpvo_da3_two_view"
+
     paths = ReconstructionPaths.from_run_dir(
         args.run_dir,
         tracking_dir=args.tracking_dir,
-        graph_path=args.graph_path,
+        graph_path=graph_path,
         cbs_csv=args.cbs_csv,
         sparse_ply=args.sparse_ply,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
+        use_default_sparse=not raw_dpvo,
     )
-    loaded = load_reconstruction(
+    loader = load_raw_dpvo_reconstruction if raw_dpvo else load_reconstruction
+    loaded = loader(
         paths,
         minimum_baseline=args.minimum_baseline,
         intra_pair_gap=args.intra_pair_gap,
@@ -156,6 +184,7 @@ def main() -> int:
         weights_revision=args.weights_revision,
         process_res=args.process_res,
         minimum_da3_baseline=args.minimum_da3_baseline,
+        inference_mode=RAW_DPVO_INFERENCE_MODE if raw_dpvo else INFERENCE_MODE,
     ).validate()
     fusion_settings = FusionSettings(
         confidence_percentile=args.confidence_percentile,
@@ -169,6 +198,7 @@ def main() -> int:
         dpvo_keypoint_min_matches_per_view=args.dpvo_keypoint_min_matches_per_view,
         pixel_stride=args.pixel_stride,
         voxel_size=args.voxel_size,
+        cross_robot_voxel_fusion=not raw_dpvo,
     ).validate()
 
     base_count = sum(job.kind.startswith("intra_robot") for job in loaded.jobs)
@@ -180,7 +210,8 @@ def main() -> int:
     )
     print(
         f"Validated {len(loaded.artifacts)} robots, {keyframe_count} keyframes; "
-        f"scheduled {base_count} base + {loop_count} loop = {len(loaded.jobs)} pairs"
+        f"scheduled {base_count} base + {loop_count} loop = {len(loaded.jobs)} pairs; "
+        f"trajectory_source={loaded.trajectory_source}"
     )
     if len(selected_jobs) != len(loaded.jobs):
         print(f"Smoke-test prefix: processing {len(selected_jobs)} pairs")

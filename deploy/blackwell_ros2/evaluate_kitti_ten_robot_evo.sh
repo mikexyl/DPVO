@@ -16,15 +16,22 @@ result_zip_dir="$evo_dir/results"
 mkdir -p "$result_zip_dir"
 
 overlap_frames="${DPVO_KITTI_OVERLAP_FRAMES:-200}"
-case "$overlap_frames" in
-  200)
+sequence="${DPVO_KITTI_SEQUENCE:-00}"
+case "$sequence:$overlap_frames" in
+  00:200)
     windows=(0 554 354 1008 808 1462 1262 1916 1716 2370 2170 2825 2625 3279 3079 3733 3533 4187 3987 4541)
     ;;
-  50)
+  00:50)
     windows=(0 479 429 933 883 1387 1337 1841 1791 2295 2245 2750 2700 3204 3154 3658 3608 4112 4062 4541)
     ;;
+  05:200)
+    windows=(0 376 176 652 452 928 728 1204 1004 1480 1280 1757 1557 2033 1833 2309 2109 2585 2385 2761)
+    ;;
+  05:50)
+    windows=(0 301 251 577 527 853 803 1129 1079 1405 1355 1682 1632 1958 1908 2234 2184 2510 2460 2761)
+    ;;
   *)
-    echo "unsupported DPVO_KITTI_OVERLAP_FRAMES=$overlap_frames (expected 50 or 200)" >&2
+    echo "unsupported KITTI sequence/overlap combination: $sequence/$overlap_frames" >&2
     exit 2
     ;;
 esac
@@ -32,6 +39,7 @@ esac
 pixi run python deploy/blackwell_ros2/export_kitti_evo_tum.py \
   "$result_dir" \
   --dataset-root "$dataset_root" \
+  --sequence "$sequence" \
   --tag "$tag" \
   --windows "${windows[@]}"
 
