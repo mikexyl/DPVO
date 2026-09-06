@@ -66,6 +66,7 @@ class RerunViewer:
         sam_video_max_tracks=8,
         sam_video_refresh=10,
         sam_video_memory=3,
+        sphere_options=None,
     ):
         self.patch_graph = patch_graph
         self.height = height
@@ -87,6 +88,9 @@ class RerunViewer:
         self.dense_map_output = dense_map_output
         self.dense_updates = []
         self._dense_camera_to_world = None
+        self.local_sphere = None
+        self.sphere_updates = []
+        self.sphere_anchor = None
 
         if sam_model is not None and yolo_model is not None:
             raise ValueError("SAM and YOLO segmentation backends are mutually exclusive")
@@ -94,6 +98,8 @@ class RerunViewer:
             raise ValueError("SAM's class-agnostic regions cannot populate the semantic scene graph")
         if sam_video and sam_model is None:
             raise ValueError("SAM video requires a SAM TensorRT bundle")
+        if sphere_options is not None and da3_engine is None:
+            raise ValueError("local spheres require a DA3 dense map")
 
         if yolo_model is not None:
             from .yolo_detector import YoloTensorRTDetector
@@ -140,6 +146,10 @@ class RerunViewer:
             )
             self._dense_camera_to_world = _camera_to_world
 
+        if sphere_options is not None:
+            from .local_sphere import LocalSphereBuilder
+            self.local_sphere = LocalSphereBuilder(self.dense_map, **sphere_options)
+
         camera_view = rrb.Spatial2DView(
             name="Camera",
             origin="world/camera/image",
@@ -155,13 +165,24 @@ class RerunViewer:
         if self.dense_map is not None:
             right_views.append(rrb.Spatial2DView(name="Aligned DA3 Depth", origin="dense"))
             row_shares.append(1)
+        if self.local_sphere is not None:
+            atlas_views = [rrb.Spatial2DView(name="Sphere RGB", origin="local_sphere/rgb")]
+            atlas_views.extend([
+                rrb.Spatial2DView(name="Anchor Only", origin="local_sphere/anchor"),
+                rrb.Spatial2DView(name="History Gain", origin="local_sphere/history_gain"),
+            ])
+            if self.sam_segmenter is not None:
+                atlas_views.append(rrb.Spatial2DView(name="Sphere SAM", origin="local_sphere/sam"))
+            atlas_views.append(rrb.Spatial2DView(name="Sphere Radial Depth", origin="local_sphere/depth"))
+            right_views.append(rrb.Tabs(*atlas_views, active_tab=0))
+            row_shares.append(2)
         if len(right_views) == 1:
             right_panel = camera_view
         else:
             right_panel = rrb.Vertical(*right_views, row_shares=row_shares)
-        reconstruction = rrb.Spatial3DView(name="Reconstruction", origin="world")
+        reconstruction_views = [rrb.Spatial3DView(name="Reconstruction", origin="world")]
         if self.dense_map is not None and self.sam_segmenter is not None:
-            reconstruction = rrb.Tabs(
+            reconstruction_views = [
                 rrb.Spatial3DView(
                     name="SAM-colored Dense Map", origin="world",
                     contents=["$origin/**", "- $origin/dense/**", "- $origin/points"],
@@ -170,8 +191,17 @@ class RerunViewer:
                     name="RGB Dense Map", origin="world",
                     contents=["$origin/**", "- $origin/dense_sam/**"],
                 ),
-                active_tab=0,
-            )
+            ]
+        if self.local_sphere is not None:
+            reconstruction_views.insert(0, rrb.Spatial3DView(
+                name="Local Sphere", origin="world/local_sphere/current",
+                contents=["$origin/mesh", "$origin/center", "$origin/axes", "$origin/guide"],
+            ))
+        # Open in map context so corridor snapshots can be located spatially;
+        # the isolated Local Sphere remains available as the first tab.
+        active_reconstruction = len(reconstruction_views) - 1 if self.local_sphere is not None else 0
+        reconstruction = (reconstruction_views[0] if len(reconstruction_views) == 1 else
+                          rrb.Tabs(*reconstruction_views, active_tab=active_reconstruction))
         blueprint = rrb.Blueprint(
             rrb.Horizontal(
                 reconstruction,
@@ -237,6 +267,8 @@ class RerunViewer:
             )
         if self.dense_map is not None:
             self.dense_updates = self.dense_map.update(num_frames)
+            if self.local_sphere is not None:
+                self.sphere_updates = self.local_sphere.ingest(self.dense_updates, num_frames)
         self._log_state(self.frame_index)
         self.frame_index += 1
 
@@ -340,6 +372,8 @@ class RerunViewer:
             self._log_scene_graph()
         if self.dense_map is not None:
             self._log_dense_map()
+        if self.local_sphere is not None:
+            self._log_local_sphere()
 
     def _log_dense_map(self):
         for frame in self.dense_updates:
@@ -400,6 +434,53 @@ class RerunViewer:
         for frame in self.dense_updates:
             frame.aligned_depth = None
         self.dense_updates = []
+
+    def _log_local_sphere(self):
+        from .local_sphere import observed_sphere_mesh
+
+        path = "world/local_sphere/current"
+        for sphere in self.sphere_updates:
+            self.sphere_anchor = sphere.anchor_timestamp
+            coverage = np.isfinite(sphere.radial_depth)
+            vertices, triangles, uv = observed_sphere_mesh(coverage, sphere.radius)
+            rr.log(f"{path}/mesh", rr.Mesh3D(vertex_positions=vertices, triangle_indices=triangles,
+                                            vertex_texcoords=uv, albedo_texture=sphere.rgb[..., :3]))
+            rr.log(f"{path}/center", rr.Points3D([[0, 0, 0]], colors=[255, 200, 0],
+                                                radii=rr.Radius.ui_points(4),
+                                                labels=[f"keyframe {sphere.anchor_timestamp}"], show_labels=True))
+            rr.log(f"{path}/axes", rr.Arrows3D(origins=np.zeros((3, 3)),
+                                              vectors=np.eye(3) * sphere.radius * 0.4,
+                                              colors=[[255, 0, 0], [0, 255, 0], [0, 100, 255]]))
+            angles = np.linspace(0, 2 * np.pi, 97)
+            circle = sphere.radius * np.column_stack((np.cos(angles), np.sin(angles), np.zeros_like(angles)))
+            rr.log(f"{path}/guide", rr.LineStrips3D(
+                [circle, circle[:, [0, 2, 1]], circle[:, [2, 0, 1]]],
+                colors=[255, 190, 30, 150], radii=rr.Radius.ui_points(0.7)))
+            rr.log(f"{path}/source_cameras", rr.Points3D(sphere.source_centers,
+                         colors=[255, 170, 0], labels=[str(t) for t in sphere.metadata['source_timestamps']]))
+            rr.log("local_sphere/rgb", rr.Image(sphere.rgb))
+            rr.log("local_sphere/anchor", rr.Image(sphere.anchor_rgb))
+            rr.log("local_sphere/history_gain", rr.Image(sphere.history_gain))
+            if sphere.sam is not None:
+                rr.log("local_sphere/sam", rr.Image(sphere.sam))
+            valid_depth = sphere.radial_depth[coverage]
+            rr.log("local_sphere/depth", rr.DepthImage(sphere.radial_depth, meter=1.0, colormap="turbo",
+                                                       depth_range=np.quantile(valid_depth, [0.01, 0.99])))
+            for key in ("pixel_coverage", "solid_angle_coverage", "anchor_solid_angle_coverage",
+                        "history_added_solid_angle", "history_only_fraction", "projection_seconds", "save_seconds"):
+                rr.log(f"local_sphere/stats/{key}", rr.Scalars(sphere.metadata[key]))
+            rr.log("local_sphere/info", rr.TextDocument(
+                f"Camera-centered local window {sphere.metadata['source_timestamps']}; "
+                f"anchor={sphere.anchor_timestamp}, display radius={sphere.radius:.3f}. "
+                f"History adds {sphere.metadata['history_added_solid_angle']:.1%} of full-sphere directions. "
+                "Nearest radial surface; unknown directions have no mesh. Depth is radial, in DPVO scale."))
+        # The sphere remains attached to its keyframe camera during pose updates.
+        if self.sphere_anchor is not None:
+            pose = self.dense_map.pose(self.sphere_anchor, self.num_frames)
+            if pose is not None:
+                rotation, center = self._dense_camera_to_world(pose)
+                rr.log(path, rr.Transform3D(translation=center, mat3x3=rotation))
+        self.sphere_updates = []
 
     def _log_scene_graph(self):
         nodes = self.scene_graph.visible_nodes()
@@ -466,6 +547,9 @@ class RerunViewer:
 
         if self.dense_map is not None:
             self.dense_updates = self.dense_map.finalize(self.num_frames)
+            if self.local_sphere is not None:
+                self.sphere_updates = self.local_sphere.ingest(self.dense_updates, self.num_frames)
+                self.sphere_updates.extend(self.local_sphere.finalize(self.num_frames))
         if self.frame_index > 0:
             self._log_state(self.frame_index - 1)
         if self.scene_graph is not None and self.scene_graph_output is not None:
@@ -480,5 +564,7 @@ class RerunViewer:
         if self.sam_segmenter is not None and self.sam_output is not None:
             summary = self.sam_segmenter.save_report(self.sam_output, self.image, self.detections)
             print(f"Saved SAM segmentation report to {self.sam_output}: {summary}")
+        if self.local_sphere is not None:
+            print(f"Saved {len(self.local_sphere.records)} local sphere snapshots to {self.local_sphere.output_dir}")
         rr.disconnect()
         self.closed = True

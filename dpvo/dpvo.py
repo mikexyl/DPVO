@@ -50,6 +50,7 @@ class DPVO:
         sam_video_max_tracks=8,
         sam_video_refresh=10,
         sam_video_memory=3,
+        sphere_options=None,
     ):
         self.cfg = cfg
         self.load_weights(network)
@@ -134,6 +135,7 @@ class DPVO:
                 sam_video_max_tracks=sam_video_max_tracks,
                 sam_video_refresh=sam_video_refresh,
                 sam_video_memory=sam_video_memory,
+                sphere_options=sphere_options,
             )
 
     def load_long_term_loop_closure(self):
@@ -194,6 +196,7 @@ class DPVO:
         sam_video_max_tracks=8,
         sam_video_refresh=10,
         sam_video_memory=3,
+        sphere_options=None,
     ):
         if viewer == "pangolin":
             from dpviewer import Viewer
@@ -237,6 +240,7 @@ class DPVO:
                 sam_video_max_tracks=sam_video_max_tracks,
                 sam_video_refresh=sam_video_refresh,
                 sam_video_memory=sam_video_memory,
+                sphere_options=sphere_options,
             )
         else:
             raise ValueError(f"Unknown viewer: {viewer}")

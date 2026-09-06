@@ -55,6 +55,7 @@ def run(
     sam_video_max_tracks=8,
     sam_video_refresh=10,
     sam_video_memory=3,
+    sphere_options=None,
 ):
 
     slam = None
@@ -106,6 +107,7 @@ def run(
                 sam_video_max_tracks=sam_video_max_tracks,
                 sam_video_refresh=sam_video_refresh,
                 sam_video_memory=sam_video_memory,
+                sphere_options=sphere_options,
             )
 
         with Timer("SLAM", enabled=timeit):
@@ -217,6 +219,18 @@ if __name__ == '__main__':
         help='reject keyframe pairs above this median relative alignment error',
     )
     parser.add_argument('--plot', action="store_true")
+    parser.add_argument('--local-spheres', action='store_true',
+                        help='periodically project a sliding DA3 keyframe map at its newest camera center')
+    parser.add_argument('--sphere-window', type=int, default=30,
+                        help='recent accepted dense keyframes in the local map, 2-60 (default: 30)')
+    parser.add_argument('--sphere-every', type=int, default=5,
+                        help='render after N new accepted dense keyframes (default: 5)')
+    parser.add_argument('--sphere-width', type=int, default=1024,
+                        help='equirectangular width, divisible by 4, 256-2048 (default: 1024)')
+    parser.add_argument('--sphere-radius', type=float,
+                        help='display radius in DPVO units; default: 0.2 times median radial depth')
+    parser.add_argument('--sphere-output-dir', metavar='PATH',
+                        help='new output directory for local sphere PNG/NPZ snapshots')
     parser.add_argument('--opts', nargs='+', default=[])
     parser.add_argument('--save_ply', action="store_true")
     parser.add_argument('--save_colmap', action="store_true")
@@ -259,6 +273,23 @@ if __name__ == '__main__':
         parser.error("--da3-engine requires the Rerun viewer")
     if args.dense_map_output and not args.da3_engine:
         parser.error("--dense-map-output requires --da3-engine")
+    sphere_options = None
+    if args.local_spheres:
+        if not args.da3_engine or args.viz or viewer != 'rerun':
+            parser.error("--local-spheres requires --da3-engine and the Rerun viewer")
+        if not 2 <= args.sphere_window <= 60 or args.sphere_every < 1:
+            parser.error("local spheres require a 2-60 keyframe window and positive render interval")
+        if not 256 <= args.sphere_width <= 2048 or args.sphere_width % 4:
+            parser.error("--sphere-width must be divisible by 4 and between 256 and 2048")
+        if args.sphere_radius is not None and (not np.isfinite(args.sphere_radius) or args.sphere_radius <= 0):
+            parser.error("--sphere-radius must be finite and positive")
+        sphere_options = dict(window_size=args.sphere_window, every=args.sphere_every,
+                              width=args.sphere_width, radius=args.sphere_radius,
+                              output_dir=args.sphere_output_dir or f"saved_spheres/{args.name}")
+        if (Path(sphere_options['output_dir']) / 'manifest.json').exists():
+            parser.error("use a new --sphere-output-dir or --name to preserve existing snapshots")
+    elif args.sphere_output_dir:
+        parser.error("--sphere-output-dir requires --local-spheres")
     scene_graph = args.scene_graph or args.scene_graph_output is not None
     if scene_graph and not args.yolo_model:
         parser.error("--scene-graph requires --yolo-model")
@@ -311,6 +342,7 @@ if __name__ == '__main__':
         sam_video_max_tracks=args.sam_video_max_tracks,
         sam_video_refresh=args.sam_video_refresh,
         sam_video_memory=args.sam_video_memory,
+        sphere_options=sphere_options,
     )
     trajectory = PoseTrajectory3D(positions_xyz=poses[:,:3], orientations_quat_wxyz=poses[:, [6, 3, 4, 5]], timestamps=tstamps)
 

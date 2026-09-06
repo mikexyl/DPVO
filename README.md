@@ -409,6 +409,92 @@ averaged 235 ms/frame; this excludes DPVO and DA3 time. SAM's temporal modules
 remain PyTorch BF16, while its image encoder/seeding and DA3 use TensorRT.
 Tests: `pixi run python -m unittest test_dense_regions test_sam_video test_sam_segmenter -q`.
 
+#### Sliding camera-centered local spheres
+
+`--local-spheres` maintains the latest 30 **accepted DA3 keyframes** as a
+local point map. After the first full window, it renders every five newly
+accepted keyframes. Windows overlap: `[0..29]`, `[5..34]`, `[10..39]`, etc. These
+indices count accepted depth keyframes, not source-video frames. A final
+snapshot includes the remaining tail (at least two keyframes).
+
+Each sphere is centered **exactly at the newest keyframe camera**, with that
+camera's orientation. At render time, source camera points are transformed
+using their current optimized DPVO poses into the anchor camera frame, then
+projected to an equirectangular image. A radial z-buffer selects the nearest
+surface and its RGB/SAM region ID together. A small 3x3 angular point splat
+covers sampling gaps; other directions stay transparent with NaN depth.
+This is a partial view of the local map, not an invented complete 360° panorama.
+
+```bash
+ffmpeg -nostdin -n -i /data/scalemaster/Office_01/rgb.mp4 -t 90 \
+    -c:v copy -an /tmp/office_01_90s.mp4
+pixi run python demo.py \
+    --imagedir=/tmp/office_01_90s.mp4 --calib=calib/office_01.txt \
+    --stride=5 --viewer=rerun \
+    --da3-engine=da3-small-2view-378x504.engine --dense-map-stride=2 \
+    --sam-model=models/sam21-tiny-trt-fp16io/sam2.json --sam-points-per-side=16 \
+    --sam-video --sam-video-max-tracks=8 --sam-video-memory=3 --sam-video-refresh=10 \
+    --local-spheres --sphere-window=30 --sphere-every=5 --sphere-width=1024 \
+    --rerun-save=rerun_recordings/office_01_90s_local_spheres_w30.rrd \
+    --name=office_01_90s_local_spheres_w30 --save_trajectory
+pixi run rerun rerun_recordings/office_01_90s_local_spheres_w30.rrd
+```
+
+The projection consumes existing dense points; no extra neural inference or
+full RGB-D raster retention is needed. `--dense-map-stride=2` supplies denser
+sampling for rendering; the normal map default remains 7. The sphere window
+holds at most `--sphere-window` keyframes (2-60) independently of the accumulated
+global dense map. The new implementation does not use a geometric-median
+center or partition frames into non-overlapping groups.
+
+Rerun opens in the reconstruction view to locate the current sphere in the
+corridor map. Its `Local Sphere` tab shows the textured surface and anchor
+camera axes in isolation. Thin yellow great circles mark the display boundary
+only, not inferred scene geometry. Separate 2D tabs show RGB, SAM colors (when
+enabled), radial depth, the **Anchor Only** projection, and **History Gain**.
+The last view shows only directions covered by history but missing from the
+anchor-only projection. Both comparisons use the same sampling and splat
+settings. Metadata reports anchor/full solid-angle coverage, added coverage,
+and the fraction of the full projection supplied only by older keyframes.
+Duplicate angular samples are reduced before splatting to limit the rendering
+cost of a larger window, preserving the same radial nearest-surface result.
+Unobserved patches have no triangles, since Rerun's mesh texture alpha is
+ignored. The display sphere radius defaults to 0.2 times the median observed
+radial distance, or set `--sphere-radius` in DPVO units. This radius only
+controls visualization; it does not rescale or replace the saved depth.
+
+Snapshots are saved under `saved_spheres/<name>/keyframe_<timestamp>/`:
+`rgb.png`, optional `sam.png`, `anchor_rgb.png`, `history_gain.png`,
+`projection.npz` (full and anchor-only radial depth, region IDs,
+source timestamp per pixel, anchor center/orientation and display radius),
+and `metadata.json` (source poses, coverage, timings). A root `manifest.json`
+lists the overlapping windows. Override with `--sphere-output-dir`; use a
+fresh directory/name for each trial to avoid overwriting snapshots. The
+saved poses describe the map at projection time; Rerun keeps the live sphere
+attached to its anchor as DPVO refines that pose. Re-rendering occurs at the
+next cadence, not continuously between snapshots.
+
+Tests: `pixi run python -m unittest test_local_sphere test_dense_regions test_sam_video test_sam_segmenter -q`.
+
+The initial five-keyframe/every-three, first-30-second Office_01 trial
+(stride 5, DA3 + SAM video enabled) produced
+30 snapshots from 91 accepted dense keyframes / 180 processed images. Projection
+averaged 201 ms per snapshot and saving PNG/NPZ files another 28 ms; these
+exclude inference, mesh construction, and Rerun logging. Mean observed solid
+angle was 12.9% of the full sphere. The unobserved rear hemisphere and gaps in
+the filtered local depth map are intentionally absent from the surface.
+
+The longer 90-second corridor trial with a 30-keyframe/every-five window
+completed 540 images, 259 accepted dense keyframes, and 47 snapshots. Windows
+spanned 9.9 video seconds on average. Mean solid-angle coverage was 60.0% for
+the local map versus 7.3% for the anchor alone; 85.3% of observed directions
+were supplied only by history on average. At the final corridor keyframe 539,
+coverage was 94.1% versus 7.3%. This measures angular coverage, not geometric
+accuracy: depth noise, occlusion holes, and pose errors remain visible.
+Mean projection/comparison time was 512 ms per snapshot plus 98 ms for saving,
+excluding neural inference, mesh construction, and Rerun logging. The longer
+trial's recording is `office_01_90s_local_spheres_w30.rrd`.
+
 ### iPhone
 ```bash
 python demo.py --imagedir=movies/IMG_0492.MOV --calib=calib/iphone.txt --stride=5 --plot --viz
