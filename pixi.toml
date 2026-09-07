@@ -70,6 +70,9 @@ MAX_JOBS = "6"
 PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
 
 [tasks]
+download-sphorb-tables = { cmd = "python scripts/download_sphorb_tables.py" }
+build-sphorb = { cmd = "python scripts/build_sphorb.py", depends-on = ["download-sphorb-tables"] }
+build-teaser = { cmd = "python scripts/build_teaser.py" }
 build = { cmd = "python -m pip install --no-build-isolation -e ." }
 verify = { cmd = "python -c \"import torch, cuda_ba, cuda_corr, lietorch_backends; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available()); print('DPVO extensions: OK')\"", depends-on = ["build"] }
 configure-pangolin = { cmd = "cmake -S Pangolin -B Pangolin/build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF -DBUILD_TOOLS=OFF -DBUILD_PANGOLIN_PYTHON=OFF" }

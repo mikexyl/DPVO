@@ -495,6 +495,80 @@ Mean projection/comparison time was 512 ms per snapshot plus 98 ms for saving,
 excluding neural inference, mesh construction, and Rerun logging. The longer
 trial's recording is `office_01_90s_local_spheres_w30.rrd`.
 
+#### ORB / bag-of-words sphere place-recognition experiment
+
+`sphere_place_recognition.py` works offline on the saved RGB spheres; it does
+not rerun DPVO, DA3, or SAM and does not change their maps. It extracts ORB from
+six 384×384, 90-degree perspective cube views of each equirectangular sphere,
+then maps the keypoints back onto its panorama and 3D unit sphere. Up to 500
+features per face are retained. Invalid alpha pixels are excluded, including
+the rotated descriptor patch and blur footprint at each pyramid scale. No
+missing pixels are inpainted. RGB is used, not SAM's arbitrary instance colors.
+
+```bash
+pixi run python sphere_place_recognition.py \
+    --spheres saved_spheres/office_01_90s_local_spheres_w30 \
+    --output saved_spheres/office_01_90s_local_spheres_w30/orb_bow_trial \
+    --train-spheres 12 --words 4096 --spawn
+# Reopen the completed 4,096-word trial:
+pixi run rerun saved_spheres/office_01_90s_local_spheres_w30/orb_bow_4096/sphere_retrieval.rrd
+```
+
+This is a small, flat **binary k-medians** vocabulary: assignment uses Hamming
+distance and centers use bitwise majority, rather than Euclidean clustering
+of ORB bytes. It is independent of the optional C++ DBoW2 backend and requires
+no extra dependencies. The ORB `WTA_K=2` / Hamming convention follows the
+[OpenCV ORB documentation](https://docs.opencv.org/4.x/d1/d89/tutorial_py_orb.html).
+Training is balanced across the first `--train-spheres` spheres (default 12),
+capped at 30,000 descriptors with a fixed seed. Vocabulary and smoothed IDF
+are frozen before later queries. Log term-frequency, IDF weighting and L2
+normalization yield cosine similarity; **scores are not match probabilities**.
+
+Candidate retrieval is past-only and excludes **any pair sharing a source
+keyframe**, not just adjacent sphere anchors. Queries sharing any training
+source keyframe are also purged at the train/query boundary. Empty-feature
+spheres never become candidates. `--min-anchor-gap` adds a separation in
+processed-frame indices, not seconds. `--vocabulary path/to/vocabulary.npz`
+reuses a frozen model; same-input training provenance is retained for purging.
+For an external input directory, the caller must ensure the vocabulary was
+trained independently, including when the same data has been copied/renamed.
+
+Top-three candidates additionally receive mutual, two-sided ratio-tested ORB
+matches (Hamming ≤64, ratio <0.75). A diagnostic Sim(3) RANSAC uses their saved
+DA3 radial depths, with a 3% relative-depth residual threshold and scale range
+0.25–4. These noisy-depth checks do not affect the appearance ranking or insert
+loop closures. Repeated doors, texture-poor walls and projection/stitching
+artifacts can still produce misleading similarities or correspondences.
+
+The new output directory contains `features/*.npz` (ORB bytes, panorama UVs,
+bearings, radial-depth 3D points, cube face/pixel/scale), keypoint PNGs,
+`vocabulary.npz`, `retrieval.npz` (histograms, TF-IDF vectors, full score matrix,
+eligibility mask), `report.json`, `similarity.png`, top-one pair montages, and
+`sphere_retrieval.rrd`. Existing output directories are never overwritten.
+The Rerun recording shows textured spheres with ORB points, panorama keypoints,
+top-one correspondences, all-pairs/eligible-only similarity matrices and top-three
+rankings. Scrub `sphere_anchor` through the held-out queries. Green matches pass
+the depth diagnostic; orange matches have appearance support only. Use
+`--no-rerun` to skip recording, or omit `--spawn` to save without opening a GUI.
+
+On the saved 90-second Office_01 trial, all 47 spheres yielded 731–3,000 ORB
+features (mean 1,750). The initial 12 spheres trained the vocabulary; after
+boundary purging, 30 query spheres and 794 past/disjoint pairs remained. The
+4,096-word CPU trial averaged 125 ms per sphere for loading and extraction;
+one-time training took 3.05 s and quantization/ranking of all 47 took 0.63 s.
+The analysis and PNG/NPZ exports took 13.9 s, excluding Rerun recording/rendering.
+
+The 512-word baseline (`orb_bow/`) produced high top-one scores (0.667–0.892)
+with little correspondence support. Increasing to 4,096 words (`orb_bow_4096/`)
+reduced that saturation (0.249–0.526), but did **not establish reliable place
+recognition**: only three of 90 top-three candidates had six or more depth
+inliers (6, 8 and 6), and none had more than eight. In particular, final sphere
+539 retrieved 463 at 0.526 with seven appearance matches and zero depth inliers.
+These are exploratory candidates, not confirmed revisits; this single run is
+not a ground-truth loop-closure benchmark.
+
+Tests: `pixi run python -m unittest test_sphere_bow test_local_sphere test_dense_regions test_sam_video test_sam_segmenter -q`.
+
 ### iPhone
 ```bash
 python demo.py --imagedir=movies/IMG_0492.MOV --calib=calib/iphone.txt --stride=5 --plot --viz
@@ -571,6 +645,22 @@ To train (log files will be written to `runs/<your name>`). Model will be run on
 ```
 python train.py --steps=240000 --lr=0.00008 --name=<your name>
 ```
+
+## Optional SPHORB sphere features
+
+Saved-sphere retrieval supports `--extractor sphorb` through an optional
+geodesic-grid C++ backend. Cube ORB remains the default. Run `pixi run build-sphorb`,
+then see [the usage, validation and offline comparison guide](docs/sphorb.md).
+The native SPHORB source is GPL-derived and separate from DPVO's MIT code;
+[upstream notices and modifications](native/sphorb/MODIFICATIONS.md) are preserved.
+
+The optional `pixi run build-teaser` task builds upstream TEASER++ for offline
+Sim(3) verification of spherical bearing × radial-depth points, with no pinhole
+or fisheye projection. See the [Office comparison and reproduction commands](docs/sphorb-teaser.md).
+
+The [offline Office Sim3 pose graph](docs/sphorb-office-pose-graph.md) optimizes
+saved keyframes using those sphere-derived measurements, with robust loop
+weights and before/after Rerun views. It leaves the original DPVO outputs intact.
 
 ## Change Log
 * **Aug 2022**: Initial release

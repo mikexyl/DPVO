@@ -1,0 +1,3 @@
+# System OpenCV 4.5.4 pulls in TBB 2020.3. Its shutdown retains scheduler
+# allocations (792 bytes / 3 objects on this host). Do not suppress SPHORB frames.
+leak:libtbb.so.2

@@ -1,0 +1,3 @@
+# OpenLORIS corridor1-2 d400_color_optical_frame, 848x480, zero distortion.
+# sensors.yaml stores fx,cx,fy,cy; DPVO expects fx,fy,cx,cy.
+611.45098876953125 611.4857177734375 433.2039794921875 249.4730224609375
