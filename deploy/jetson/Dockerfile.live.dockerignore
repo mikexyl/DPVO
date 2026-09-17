@@ -1,0 +1,7 @@
+**
+!deps/live-wheels/**
+!deploy/jetson/**
+!dpvo/rerun_viewer.py
+!config/jetson_live.yaml
+!config/jetson_balanced.yaml
+**/__pycache__

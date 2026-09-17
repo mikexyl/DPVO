@@ -1,0 +1,10 @@
+# Optional runtime overlay; works with existing JP6.2 or JP7.2 online images.
+# No DA3 Python package or model weights are required at runtime.
+ARG BASE_IMAGE=dpvo:online-jp72
+FROM ${BASE_IMAGE}
+COPY deploy/jetson/patch_preview.py deploy/jetson/da3_export.py deploy/jetson/da3_runtime.py deploy/jetson/dense_mapping.py /opt/dpvo/deploy/jetson/
+COPY ros2/dpvo_multi_robot/dpvo_multi_robot/online_status.py ros2/dpvo_multi_robot/dpvo_multi_robot/node.py ros2/dpvo_multi_robot/dpvo_multi_robot/online_control.py ros2/dpvo_multi_robot/dpvo_multi_robot/online_viewer.py /opt/online_ws/install/dpvo_multi_robot/lib/python3.12/site-packages/dpvo_multi_robot/
+
+COPY dpvo/loop_closure/distributed.py /opt/dpvo/dpvo/loop_closure/distributed.py
+
+COPY ros2/dpvo_multi_robot/dpvo_multi_robot/online_common.py ros2/dpvo_multi_robot/dpvo_multi_robot/online_cbs.py /opt/online_ws/install/dpvo_multi_robot/lib/python3.12/site-packages/dpvo_multi_robot/

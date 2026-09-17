@@ -14,7 +14,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path as PathMessage
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (
@@ -22,8 +22,8 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
-from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import Bool, Header
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField, CompressedImage
+from std_msgs.msg import Bool, Header, String
 import torch
 
 from dpvo import projective_ops as pops
@@ -35,7 +35,7 @@ from dpvo.loop_closure.tracking_artifact import (
     save_tracking_artifact,
     write_incomplete_manifest,
 )
-from dpvo.map_gauge import transform_poses_xyzw
+from dpvo.map_gauge import transform_poses_xyzw, transform_points
 
 from .transport import Ros2DistributedTransport
 
@@ -61,10 +61,11 @@ class MultiRobotDpvoNode(Node):
         self.processing_lock = threading.RLock()
         self.callback_group = ReentrantCallbackGroup()
         self.camera = None
+        self._pending_camera_image = None
         self.slam = None
         self.last_published_keyframe = -1
         self.path = PathMessage()
-        self.path.header.frame_id = self.get_parameter("map_frame").value
+        self.path.header.frame_id = self._frame_id()
         artifact_root = self.get_parameter("tracking_artifact_output").value
         self.tracking_artifact_dir = (
             Path(artifact_root).expanduser() / self.robot_id
@@ -183,9 +184,38 @@ class MultiRobotDpvoNode(Node):
             self.get_parameter("frame_ack_topic").value,
             ack_qos,
         )
+        self.image_callback_group = MutuallyExclusiveCallbackGroup()
+        self.dense_mapper = None
+        self.dense_publisher = None
+        if self.get_parameter("enable_dense_mapping").value:
+            from deploy.jetson.dense_mapping import OnlineDenseMapper
+            self.dense_mapper = OnlineDenseMapper(
+                self.get_parameter("dense_engine").value,
+                fps=float(self.get_parameter("dense_fps").value),
+                max_points=int(self.get_parameter("dense_max_points").value),
+                voxel_size=float(self.get_parameter("dense_voxel_size").value))
+            self.dense_publisher = self.create_publisher(
+                PointCloud2, "dpvo/dense_points", QoSProfile(
+                    depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+        from deploy.jetson.patch_preview import PatchPreview
+        self.patch_preview = PatchPreview()
+        self.last_preview = time.monotonic()
+        self.preview_frames = 0
+        self.preview_publisher = self.create_publisher(
+            CompressedImage, 'dpvo/preview/compressed', QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+        self.tracking_status_publisher = self.create_publisher(String, 'dpvo/tracking_status', 1)
+        self.last_online_map = 0.0
+        self.online_map_publisher = None
+        if float(self.get_parameter("online_map_fps").value) > 0:
+            self.online_map_publisher = self.create_publisher(
+                PointCloud2, "dpvo/points", QoSProfile(
+                    depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         image_qos = QoSProfile(
             depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=(ReliabilityPolicy.BEST_EFFORT
+                         if self.get_parameter("image_best_effort").value
+                         else ReliabilityPolicy.RELIABLE),
             durability=DurabilityPolicy.VOLATILE,
         )
         info_qos = QoSProfile(
@@ -205,7 +235,7 @@ class MultiRobotDpvoNode(Node):
             self.get_parameter("image_topic").value,
             self._image,
             image_qos,
-            callback_group=self.callback_group,
+            callback_group=self.image_callback_group,
         )
         self.done_subscription = self.create_subscription(
             Bool,
@@ -262,6 +292,19 @@ class MultiRobotDpvoNode(Node):
         self.declare_parameter("camera_info_topic", "/camera/camera_info")
         self.declare_parameter("image_scale", 1.0)
         self.declare_parameter("viewer", "none")
+        self.declare_parameter("trt_encoders", "")
+        self.declare_parameter("image_best_effort", False)
+        self.declare_parameter("session_frame_ids", False)
+        self.declare_parameter("online_max_frames", 0)
+        self.declare_parameter("online_map_fps", 0.0)
+        self.declare_parameter("online_max_points", 3000)
+        self.declare_parameter("online_preview_fps", 2.0)
+        self.declare_parameter("online_check_health", False)
+        self.declare_parameter("enable_dense_mapping", False)
+        self.declare_parameter("dense_engine", "/output/da3-small-238x378/da3.engine")
+        self.declare_parameter("dense_fps", 0.5)
+        self.declare_parameter("dense_max_points", 50000)
+        self.declare_parameter("dense_voxel_size", 0.02)
         self.declare_parameter("rerun_save", "")
         self.declare_parameter("rerun_connect", "")
         self.declare_parameter("rerun_recording_id", "")
@@ -313,7 +356,12 @@ class MultiRobotDpvoNode(Node):
     def _camera_info(self, message):
         camera_matrix = np.asarray(message.k, dtype=np.float64).reshape(3, 3)
         distortion = np.asarray(message.d, dtype=np.float64)
-        self.camera = (camera_matrix, distortion)
+        with self.processing_lock:
+            self.camera = (camera_matrix, distortion)
+            pending = self._pending_camera_image
+            self._pending_camera_image = None
+            if pending is not None:
+                self._image(pending)
 
     def _process_distributed(self):
         if self.slam is None or not self.processing_lock.acquire(blocking=False):
@@ -424,10 +472,13 @@ class MultiRobotDpvoNode(Node):
 
     @torch.no_grad()
     def _image(self, message):
-        if self.camera is None:
-            self._publish_ack(message)
-            return
         with self.processing_lock:
+            if self.camera is None:
+                # CameraInfo and Image are different topics: their callbacks
+                # can arrive in either order. Hold the image and backpressure
+                # the player until it is processed, rather than skipping it.
+                self._pending_camera_image = message
+                return
             camera_matrix, distortion = self.camera
             image = self._decode_image(message)
             if distortion.size and np.any(distortion):
@@ -479,9 +530,66 @@ class MultiRobotDpvoNode(Node):
                     [int(cv2.IMWRITE_JPEG_QUALITY), 95],
                 ):
                     raise RuntimeError(f"failed to write tracking frame {frame_path}")
+            frame_limit = int(self.get_parameter("online_max_frames").value)
+            if frame_limit and (self.slam.counter >= frame_limit or self.slam.n >= self.slam.N - 2):
+                raise RuntimeError("Live session capacity reached; press Start for a fresh session")
+            if self.dense_mapper is not None:
+                self.dense_mapper.remember(int(self.slam.counter), image)
+            preview_input_index = int(self.slam.counter)
             self.slam(timestamp, image_tensor, intrinsics)
+            if self.get_parameter("online_check_health").value:
+                from deploy.jetson.tracking_health import tracking_health
+                health = tracking_health(self.slam.pg.poses_[:self.slam.n],
+                    self.slam.pg.patches_[max(0, self.slam.n-3):self.slam.n, :, 2],
+                    self.slam.is_initialized)
+                if health['lost']:
+                    raise RuntimeError("Tracking lost; press Start for a fresh session")
+            if self.dense_mapper is not None:
+                try:
+                    cloud = self.dense_mapper.update(self.slam, intrinsics_np)
+                    if cloud is not None:
+                        self._publish_point_cloud(message, *cloud, self.dense_publisher)
+                        self.get_logger().info(
+                            f"DA3 dense: {len(cloud[0])} points; {self.dense_mapper.stats}",
+                            throttle_duration_sec=5.)
+                except Exception as error:
+                    self.get_logger().error(f"Dense mapping stopped: {error}")
+                    self.dense_mapper.close()
+                    self.dense_mapper = None
+            try:
+                self._publish_preview(message, image, preview_input_index)
+            except Exception as error:
+                self.get_logger().warning(f"Patch preview failed: {error}", throttle_duration_sec=10.)
+            self._publish_online_map(message)
             self._publish_pose(message)
             self._publish_ack(message)
+
+    def _publish_preview(self, image_message, image, input_index):
+        self.preview_frames += 1
+        now = time.monotonic()
+        rate = float(self.get_parameter('online_preview_fps').value)
+        if rate <= 0:
+            return
+        due = now - self.last_preview >= 1 / rate
+        # Observe every processed frame; JPEG publication remains rate-limited.
+        preview, tracks = self.patch_preview.snapshot(self.slam, image, input_index, render=due)
+        if not due:
+            return
+        elapsed = now - self.last_preview
+        ok, jpeg = cv2.imencode('.jpg', preview, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if ok:
+            message = CompressedImage()
+            message.header.stamp = image_message.header.stamp
+            message.header.frame_id = self._frame_id()
+            message.format = 'jpeg'
+            message.data = jpeg.tobytes()
+            self.preview_publisher.publish(message)
+        self.tracking_status_publisher.publish(String(data=json.dumps(dict(
+            session=self.session_id, state='tracking' if self.slam.is_initialized else 'initializing',
+            processed_frames=int(self.slam.counter), keyframes=int(self.slam.n),
+            points=int(self.slam.m) if self.slam.is_initialized else 0,
+            patch_tracks=tracks, processing_fps=self.preview_frames / elapsed))))
+        self.last_preview, self.preview_frames = now, 0
 
     def _publish_ack(self, image_message):
         acknowledgement = Header()
@@ -515,7 +623,7 @@ class MultiRobotDpvoNode(Node):
         if (rerun_save or rerun_connect) and viewer is None:
             viewer = "rerun"
 
-        return DPVO(
+        slam = DPVO(
             self.cfg,
             self.get_parameter("network").value,
             ht=image_shape[0],
@@ -531,6 +639,51 @@ class MultiRobotDpvoNode(Node):
             ),
             long_term_lc_factory=loop_closure_factory,
         )
+        engines = self.get_parameter("trt_encoders").value
+        if engines:
+            from deploy.jetson.tensorrt_encoder import install_encoders
+            install_encoders(slam.network, engines, self.get_parameter("network").value)
+        return slam
+
+    def _frame_id(self):
+        if self.get_parameter("session_frame_ids").value:
+            from .online_common import session_frame
+            return session_frame(self.robot_id, self.session_id)
+        return self.get_parameter("map_frame").value
+
+    def _publish_online_map(self, image_message):
+        if self.online_map_publisher is None or not self.slam.is_initialized:
+            return
+        now = time.monotonic()
+        if now - self.last_online_map < 1.0 / float(self.get_parameter("online_map_fps").value):
+            return
+        self.last_online_map = now
+        count = self.slam.m
+        limit = max(1, int(self.get_parameter("online_max_points").value))
+        step = max(1, (count + limit - 1) // limit)
+        points = self.slam.pg.points_[:count:step].detach().float().cpu().numpy()
+        points = transform_points(self.slam.pg.session_from_map_, points)
+        colors = self.slam.pg.colors_.reshape(-1, 3)[:count:step].detach().cpu().numpy()
+        self._publish_point_cloud(image_message, points, colors, self.online_map_publisher)
+
+    def _publish_point_cloud(self, image_message, points, colors, publisher):
+        valid = np.isfinite(points).all(axis=1)
+        points, colors = points[valid], colors[valid].astype(np.uint32)
+        packed = np.zeros(len(points), dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('rgb', '<u4')])
+        for axis, name in enumerate(('x', 'y', 'z')):
+            packed[name] = points[:, axis]
+        packed['rgb'] = (colors[:, 0] << 16) | (colors[:, 1] << 8) | colors[:, 2]
+        message = PointCloud2()
+        message.header.stamp = image_message.header.stamp
+        message.header.frame_id = self._frame_id()
+        message.height, message.width = 1, len(points)
+        message.fields = [PointField(name=name, offset=4*i, count=1,
+                          datatype=PointField.FLOAT32 if i < 3 else PointField.UINT32)
+                          for i, name in enumerate(('x', 'y', 'z', 'rgb'))]
+        message.point_step, message.row_step = 16, 16 * len(points)
+        message.is_dense = True
+        message.data = packed.tobytes()
+        publisher.publish(message)
 
     def _publish_pose(self, image_message):
         if self.slam.n <= 0 or self.slam.n == self.last_published_keyframe:
@@ -551,7 +704,7 @@ class MultiRobotDpvoNode(Node):
         pose_data = poses[-1]
         pose = PoseStamped()
         pose.header.stamp = image_message.header.stamp
-        pose.header.frame_id = self.get_parameter("map_frame").value
+        pose.header.frame_id = self._frame_id()
         pose.pose.position.x = float(pose_data[0])
         pose.pose.position.y = float(pose_data[1])
         pose.pose.position.z = float(pose_data[2])
@@ -565,7 +718,7 @@ class MultiRobotDpvoNode(Node):
         # poses. All poses are expressed in the stable session map gauge.
         self.path = PathMessage()
         self.path.header.stamp = pose.header.stamp
-        self.path.header.frame_id = self.get_parameter("map_frame").value
+        self.path.header.frame_id = self._frame_id()
         for keyframe_id, pose_data in enumerate(poses):
             path_pose = PoseStamped()
             path_pose.header.frame_id = self.path.header.frame_id
@@ -672,6 +825,9 @@ class MultiRobotDpvoNode(Node):
         if self._closed:
             return
         self._closed = True
+        if self.dense_mapper is not None:
+            self.dense_mapper.close()
+            self.dense_mapper = None
         if self.slam is not None:
             with self.processing_lock:
                 # Online BA has already run. Stage one saves the final local

@@ -1,0 +1,5 @@
+# Add optional TensorRT dense mapping to an existing standalone Viser image.
+ARG DPVO_BASE_IMAGE=dpvo:jetson-viser
+FROM ${DPVO_BASE_IMAGE}
+COPY dpvo/viser_viewer.py /opt/dpvo/dpvo/viser_viewer.py
+COPY deploy/jetson/realsense_camera.py deploy/jetson/tracking_health.py deploy/jetson/live_realsense.py deploy/jetson/viser_control.py deploy/jetson/da3_runtime.py deploy/jetson/da3_export.py deploy/jetson/dense_mapping.py /opt/dpvo/deploy/jetson/

@@ -1,0 +1,5 @@
+**
+!deps/viser-wheels/**
+!deploy/jetson/**
+!dpvo/viser_viewer.py
+**/__pycache__

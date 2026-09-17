@@ -1,0 +1,15 @@
+# Experimental low-latency VO preset. Use --scale 0.5 for 752x480 input.
+# Smaller images and graph budgets require application-specific accuracy checks.
+PATCHES_PER_FRAME: 32
+REMOVAL_WINDOW: 8
+OPTIMIZATION_WINDOW: 5
+PATCH_LIFETIME: 4
+# Keep keyframe comparisons within the shorter patch lifetime.
+KEYFRAME_INDEX: 2
+KEYFRAME_THRESH: 7.5
+MOTION_MODEL: 'DAMPED_LINEAR'
+MOTION_DAMPING: 0.5
+MIXED_PRECISION: True
+CENTROID_SEL_STRAT: 'RANDOM'
+LOOP_CLOSURE: False
+CLASSIC_LOOP_CLOSURE: False

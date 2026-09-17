@@ -1,0 +1,6 @@
+# Reuse each board's Ubuntu 24.04 base without changing its CUDA stack.
+ARG BASE_IMAGE=dpvo:online-jp72-shared
+FROM ${BASE_IMAGE}
+COPY deploy/jetson/multi_robot/network-bin/zenoh-bridge-ros2dds /usr/local/bin/
+RUN chmod +x /usr/local/bin/zenoh-bridge-ros2dds && zenoh-bridge-ros2dds --version
+ENTRYPOINT ["zenoh-bridge-ros2dds"]

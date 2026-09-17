@@ -1,0 +1,6 @@
+**
+!deploy/
+!deploy/jetson/
+!deploy/jetson/multi_robot/
+!deploy/jetson/multi_robot/network-bin/
+!deploy/jetson/multi_robot/network-bin/zenoh-bridge-ros2dds

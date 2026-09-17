@@ -1,0 +1,35 @@
+# Build natively on robot0; no host packages or GPU/camera access required.
+ARG BASE_IMAGE=dpvo:online-jp72-shared
+FROM ${BASE_IMAGE} AS builder
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ninja-build libboost-all-dev libtbb-dev libyaml-cpp-dev libspdlog-dev \
+    libabsl-dev libeigen3-dev libmetis-dev pkg-config && rm -rf /var/lib/apt/lists/*
+COPY deploy/jetson/multi_robot/native/sources /src
+COPY deploy/jetson/multi_robot/native/prepare_headless.py /tmp/prepare_headless.py
+ARG BUILD_JOBS=2
+RUN cmake -S /src/gtsam -B /build/gtsam -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/opt/cbs-deps -DGTSAM_BUILD_TESTS=OFF \
+    -DGTSAM_BUILD_EXAMPLES_ALWAYS=OFF -DGTSAM_BUILD_UNSTABLE=OFF \
+    -DGTSAM_BUILD_PYTHON=OFF -DGTSAM_USE_SYSTEM_EIGEN=ON \
+    -DGTSAM_USE_SYSTEM_METIS=ON -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF \
+    && cmake --build /build/gtsam -j${BUILD_JOBS} && cmake --install /build/gtsam
+RUN cmake -S /src/aria_common -B /build/aria -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH=/opt/cbs-deps -DCMAKE_INSTALL_PREFIX=/opt/cbs-deps \
+    && cmake --build /build/aria -j${BUILD_JOBS} && cmake --install /build/aria
+COPY deploy/jetson/multi_robot/native/cbs_agent.cpp /src/cbs/examples/cbs_agent.cpp
+RUN python /tmp/prepare_headless.py /src/cbs && \
+    cmake -S /src/cbs -B /build/cbs -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH=/opt/cbs-deps -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+      -DBUILD_TESTING=ON -DCMAKE_BUILD_RPATH=/opt/cbs-deps/lib \
+    && cmake --build /build/cbs -j${BUILD_JOBS} \
+    && LD_LIBRARY_PATH=/opt/cbs-deps/lib ctest --test-dir /build/cbs --output-on-failure
+COPY deploy/jetson/multi_robot/bundle_cbs.py /tmp/bundle_cbs.py
+RUN LD_LIBRARY_PATH=/opt/cbs-deps/lib python /tmp/bundle_cbs.py \
+    --binary /build/cbs/examples/cbs_dpvo_sim3_offline --output /bundle
+FROM ${BASE_IMAGE}
+COPY --from=builder /bundle /opt/cbs
+COPY deploy/jetson/multi_robot/cbs_run.sh /opt/cbs/run
+COPY deploy/jetson/multi_robot/coordinator.py /opt/dpvo/deploy/jetson/multi_robot/coordinator.py
+RUN chmod +x /opt/cbs/run && LD_LIBRARY_PATH=/opt/cbs/lib ldd /opt/cbs/bin/cbs_dpvo_sim3_offline > /tmp/cbs-ldd.txt && ! grep -q 'not found' /tmp/cbs-ldd.txt
+CMD ["python", "deploy/jetson/multi_robot/coordinator.py"]

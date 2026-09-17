@@ -1,0 +1,7 @@
+ARG DPVO_BASE_IMAGE=dpvo:jetson-live
+FROM ${DPVO_BASE_IMAGE}
+COPY deps/viser-wheels /tmp/viser-wheels
+RUN python -m pip install --no-index --find-links=/tmp/viser-wheels viser==1.1.0
+COPY dpvo/viser_viewer.py /opt/dpvo/dpvo/viser_viewer.py
+COPY deploy/jetson /opt/dpvo/deploy/jetson
+CMD ["python", "deploy/jetson/live_realsense.py", "--viewer", "viser"]

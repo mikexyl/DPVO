@@ -46,7 +46,13 @@ class RerunViewer:
         connect_url=None,
         recording_id=None,
         entity_prefix=None,
+        web_port=None,
+        grpc_port=9876,
+        server_memory_limit="256MB",
+        cors_allow_origin=None,
     ):
+        if sum(value is not None for value in (save_path, connect_url, web_port)) > 1:
+            raise ValueError("Rerun save, connection, and web hosting are mutually exclusive")
         self.patch_graph = patch_graph
         self.height = height
         self.width = width
@@ -79,10 +85,14 @@ class RerunViewer:
             strict=True,
         )
 
-        if save_path is not None and connect_url is not None:
-            raise ValueError("Rerun save path and connection URL are mutually exclusive")
-
-        if connect_url is not None:
+        if web_port is not None:
+            self.server_uri = rr.serve_grpc(
+                grpc_port=grpc_port,
+                server_memory_limit=server_memory_limit,
+                cors_allow_origin=cors_allow_origin,
+            )
+            rr.serve_web_viewer(web_port=web_port, open_browser=False)
+        elif connect_url is not None:
             rr.connect_grpc(connect_url)
         elif save_path is None:
             rr.spawn(memory_limit="50%")

@@ -1271,7 +1271,10 @@ class DistributedLongTermLoopClosure(LongTermLoopClosure):
             bow_score=match.score,
             rotation=result.rotation,
             translation=result.translation,
-            quaternion_xyzw=Rotation.from_matrix(result.rotation).as_quat(),
+            # TEASER exposes read-only buffers; older SciPy requires writable input.
+            quaternion_xyzw=Rotation.from_matrix(
+                np.array(result.rotation, dtype=np.float64, copy=True)
+            ).as_quat(),
             scale=result.scale,
             inliers=result.inliers,
             inlier_ratio=result.inlier_ratio,

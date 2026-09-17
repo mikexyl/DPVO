@@ -24,6 +24,8 @@ def _dpvo_root():
 
 
 def _exec_module(module):
+    if os.environ.get("DPVO_USE_SYSTEM_PYTHON") == "1":
+        os.execv(sys.executable, [sys.executable, "-m", module, *sys.argv[1:]])
     pixi = shutil.which("pixi")
     if pixi is None:
         raise RuntimeError("pixi is required to run the DPVO ROS 2 node")

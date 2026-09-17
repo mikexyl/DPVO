@@ -1,0 +1,4 @@
+# UI-only update on top of each board's existing online image.
+ARG BASE_IMAGE=dpvo:online-jp72-shared
+FROM ${BASE_IMAGE}
+COPY ros2/dpvo_multi_robot/dpvo_multi_robot/online_viewer.py ros2/dpvo_multi_robot/dpvo_multi_robot/online_status.py /opt/online_ws/install/dpvo_multi_robot/lib/python3.12/site-packages/dpvo_multi_robot/

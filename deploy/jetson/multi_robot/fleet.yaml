@@ -1,0 +1,34 @@
+ros_domain_id: 73
+coordinator:
+  address: 192.168.0.156
+  web_port: 9091
+  anchor_robot: robot0
+  online_period: 10.0
+  image: dpvo:cbs-agent-jp72
+robots:
+- id: robot0
+  address: 192.168.0.156
+  profile: jetpack72
+  image: dpvo:online-jp72-shared
+  camera_serial: ''
+- id: robot1
+  address: 192.168.0.189
+  profile: jetpack62
+  image: dpvo:online-jp62-shared
+  camera_serial: ''
+- id: robot2
+  address: 192.168.0.225
+  profile: jetpack62
+  image: dpvo:online-jp62-shared
+  base_image: dpvo:jetson-jp62-viser-dla3644
+  camera_type: zed
+  camera_serial: '29882942'
+
+network:
+  transport: cyclone
+  interface_address: 192.168.0.0
+  bridge_port: 17473
+
+# Trial threshold for all pairs; restore 30 to roll back.
+loop_verification:
+  min_inliers: 15

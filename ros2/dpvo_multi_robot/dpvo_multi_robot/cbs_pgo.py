@@ -11,7 +11,6 @@ import time
 
 import numpy as np
 import rclpy
-import rerun as rr
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path as PathMessage
 from rclpy.executors import ExternalShutdownException
@@ -257,6 +256,8 @@ class CbsPgoNode(Node):
         connect_url = self.get_parameter("rerun_connect").value
         if not connect_url:
             return
+        global rr
+        import rerun as rr
         recording_id = self.get_parameter("rerun_recording_id").value or None
         rr.init("DPVO Multi Robot", recording_id=recording_id, strict=True)
         rr.connect_grpc(connect_url)
@@ -412,10 +413,12 @@ class CbsPgoNode(Node):
             }
             sessions = dict(self.sessions_by_robot)
             online = dict(self.online_transforms)
+            timestamps = {robot: self._path_timestamps(message)
+                          for robot, message in self.paths.items()}
             self.last_signature = signature
             self.worker = threading.Thread(
                 target=self._run,
-                args=(constraints, paths, sessions, online),
+                args=(constraints, paths, sessions, online, timestamps),
                 daemon=True,
             )
             self.worker.start()
@@ -479,7 +482,7 @@ class CbsPgoNode(Node):
             f"--{key}={value}" for key, value in parameters.items()
         ]
 
-    def _run(self, constraints, paths, sessions, online):
+    def _run(self, constraints, paths, sessions, online, timestamps=None):
         started = time.monotonic()
         configured_output = self.get_parameter("output_dir").value
         try:
@@ -497,7 +500,7 @@ class CbsPgoNode(Node):
                     self.get_parameter("pose_graph_odometry_weight").value
                 ),
                 align_to_global=False,
-                timestamps={
+                timestamps=timestamps if timestamps is not None else {
                     robot: self._path_timestamps(message)
                     for robot, message in self.paths.items()
                 },
@@ -646,10 +649,13 @@ class CbsPgoNode(Node):
             online,
         )
 
+    def _result_frame(self):
+        return self.get_parameter("global_frame").value
+
     def _publish_transform(self, key, transform, count, cost, residual_norm):
         message = RobotMapTransform()
         message.header.stamp = self.get_clock().now().to_msg()
-        message.header.frame_id = self.get_parameter("global_frame").value
+        message.header.frame_id = self._result_frame()
         message.robot_id, message.session_id = key
         message.local_map_to_global.translation.x = float(transform.translation[0])
         message.local_map_to_global.translation.y = float(transform.translation[1])

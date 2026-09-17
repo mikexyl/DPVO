@@ -170,3 +170,7 @@ datasets/TartanAir.pickle
 datasets/TartanAir
 TartanAirResults
 thirdparty/*
+
+# Laptop TensorRT experiments
+.runtime/trt-update-env/
+results/trt-update-laptop/

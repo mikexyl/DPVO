@@ -1,0 +1,20 @@
+[Unit]
+Description=DPVO Viser control panel (tracking starts from the browser)
+Requires=docker.service
+After=docker.service network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=DPVO_CONTAINER_NAME=dpvo-realsense
+EnvironmentFile=/etc/dpvo-viewer.env
+ExecStartPre=-/usr/bin/docker rm ${DPVO_CONTAINER_NAME}
+ExecStart=/usr/local/bin/dpvo-viewer-launch
+ExecStop=-/usr/bin/docker stop -t 15 ${DPVO_CONTAINER_NAME}
+ExecStopPost=/usr/local/bin/dpvo-viewer-launch --restore-clocks
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

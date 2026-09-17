@@ -1,0 +1,17 @@
+**
+!ros2/**
+!dpvo/**
+!config/**
+!deploy/jetson/**
+!DBoW2/**
+!DPRetrieval/**
+**/.git
+**/__pycache__
+**/build
+**/*.so
+**/*.egg-info
+deploy/jetson/multi_robot/models
+deploy/jetson/multi_robot/output
+deploy/jetson/multi_robot/generated
+!deploy/jetson/multi_robot/bundle/**
+!deploy/jetson/multi_robot/native/agent-bundle/**

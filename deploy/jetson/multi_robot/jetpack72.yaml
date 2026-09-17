@@ -1,0 +1,6 @@
+base_image: dpvo:jetson-viser
+image: dpvo:online-jp72
+numpy_major: 2
+camera_fps: 30
+camera_stride: 3
+camera_format: bgr8

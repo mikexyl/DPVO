@@ -1,0 +1,10 @@
+**
+!setup.py
+!dpvo/**
+!config/**
+!calib/**
+!deploy/jetson/**
+!demo.py
+!deps/**
+**/__pycache__
+**/*.so

@@ -1,0 +1,24 @@
+# Supply deps/include/eigen3 and deps/wheels in the build context.
+ARG DPVO_BASE_IMAGE=nvcr.io/nvidia/pytorch:26.05-py3
+FROM ${DPVO_BASE_IMAGE}
+ARG MAX_JOBS=2
+ENV TORCH_CUDA_ARCH_LIST=8.7 MAX_JOBS=${MAX_JOBS} FORCE_CUDA=1 \
+    CONDA_PREFIX=/usr MPLBACKEND=Agg PYTHONUNBUFFERED=1
+COPY deps/include/eigen3 /usr/include/eigen3
+COPY deps/wheels/torch_scatter-2.1.2.tar.gz /tmp/torch_scatter-2.1.2.tar.gz
+RUN python -m pip install --no-index --no-build-isolation --no-deps \
+    /tmp/torch_scatter-2.1.2.tar.gz
+WORKDIR /opt/dpvo
+COPY setup.py ./
+COPY dpvo ./dpvo
+RUN python -m pip install --no-build-isolation --no-deps .
+COPY deps/wheels /tmp/wheels
+RUN python -m pip install --no-index --find-links=/tmp/wheels \
+    yacs evo plyfile opencv-python-headless \
+    && python -m pip install --no-index --find-links=/tmp/wheels --no-deps pypose==0.9.5
+COPY config ./config
+COPY calib ./calib
+COPY deploy/jetson ./deploy/jetson
+COPY demo.py ./
+ENV PYTHONPATH=/opt/dpvo
+CMD ["bash"]

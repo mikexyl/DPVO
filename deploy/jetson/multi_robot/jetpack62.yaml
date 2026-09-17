@@ -1,0 +1,6 @@
+base_image: dpvo:jetson-jp62-viser
+image: dpvo:online-jp62
+numpy_major: 1
+camera_fps: 8
+camera_stride: 1
+camera_format: yuyv

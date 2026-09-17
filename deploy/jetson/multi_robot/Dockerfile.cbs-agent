@@ -1,0 +1,19 @@
+# Run on robot0 after tagging the native coordinator builder stage.
+ARG BASE_IMAGE=dpvo:online-jp72-shared
+FROM dpvo:cbs-native-builder AS builder
+COPY deploy/jetson/multi_robot/native/sources/cbs/examples/cbs_dpvo_sim3_offline.cpp /src/cbs/examples/cbs_dpvo_sim3_offline.cpp
+COPY deploy/jetson/multi_robot/native/prepare_headless.py /tmp/prepare_headless.py
+COPY deploy/jetson/multi_robot/native/cbs_agent.cpp /src/cbs/examples/cbs_agent.cpp
+RUN python /tmp/prepare_headless.py /src/cbs && cmake -S /src/cbs -B /build/cbs \
+    && cmake --build /build/cbs --target cbs_agent cbs_dpvo_sim3_offline -j2
+COPY deploy/jetson/multi_robot/bundle_cbs.py /tmp/bundle_cbs.py
+RUN LD_LIBRARY_PATH=/opt/cbs-deps/lib python /tmp/bundle_cbs.py --binary /build/cbs/examples/cbs_agent --output /agent-bundle \
+    && cp /build/cbs/examples/cbs_dpvo_sim3_offline /agent-bundle/bin/
+FROM ${BASE_IMAGE}
+COPY --from=builder /agent-bundle /opt/cbs
+COPY deploy/jetson/multi_robot/native/agent_run.sh /opt/cbs/agent
+COPY deploy/jetson/multi_robot/cbs_run.sh /opt/cbs/run
+COPY ros2/dpvo_multi_robot/dpvo_multi_robot/cbs_agent.py ros2/dpvo_multi_robot/dpvo_multi_robot/distributed_cbs.py ros2/dpvo_multi_robot/dpvo_multi_robot/online_viewer.py ros2/dpvo_multi_robot/dpvo_multi_robot/online_status.py /opt/online_ws/install/dpvo_multi_robot/lib/python3.12/site-packages/dpvo_multi_robot/
+COPY deploy/jetson/multi_robot/coordinator.py /opt/dpvo/deploy/jetson/multi_robot/coordinator.py
+RUN chmod +x /opt/cbs/agent /opt/cbs/run
+CMD ["python", "-m", "dpvo_multi_robot.cbs_agent"]

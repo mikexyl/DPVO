@@ -1,0 +1,9 @@
+# Same Ubuntu 24.04 ARM64 CPU bundle, each board keeps its existing JP parent.
+ARG BASE_IMAGE=dpvo:online-jp62-shared
+FROM ${BASE_IMAGE}
+COPY deploy/jetson/multi_robot/native/agent-bundle /opt/cbs
+COPY deploy/jetson/multi_robot/native/agent_run.sh /opt/cbs/agent
+COPY deploy/jetson/multi_robot/cbs_run.sh /opt/cbs/run
+COPY ros2/dpvo_multi_robot/dpvo_multi_robot/cbs_agent.py ros2/dpvo_multi_robot/dpvo_multi_robot/distributed_cbs.py ros2/dpvo_multi_robot/dpvo_multi_robot/online_viewer.py ros2/dpvo_multi_robot/dpvo_multi_robot/online_status.py /opt/online_ws/install/dpvo_multi_robot/lib/python3.12/site-packages/dpvo_multi_robot/
+RUN chmod +x /opt/cbs/agent /opt/cbs/run && LD_LIBRARY_PATH=/opt/cbs/lib ldd /opt/cbs/bin/cbs_agent > /tmp/agent-ldd && ! grep -q 'not found' /tmp/agent-ldd
+CMD ["python", "-m", "dpvo_multi_robot.cbs_agent"]

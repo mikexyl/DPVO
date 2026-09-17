@@ -1,0 +1,27 @@
+# JetPack 6.2.x / L4T R36.4.x: separate from the JP7 CUDA 13 image.
+ARG DPVO_BASE_IMAGE=nvcr.io/nvidia/pytorch:24.12-py3-igpu
+FROM ${DPVO_BASE_IMAGE}
+ARG MAX_JOBS=2
+ENV DEBIAN_FRONTEND=noninteractive TORCH_CUDA_ARCH_LIST=8.7 \
+    MAX_JOBS=${MAX_JOBS} FORCE_CUDA=1 CONDA_PREFIX=/usr \
+    MPLBACKEND=Agg PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libeigen3-dev libgl1 libglib2.0-0 libusb-1.0-0 ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+# Avoid the NVIDIA base image's unavailable supplemental Python index.
+ENV PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL="" PIP_DEFAULT_TIMEOUT=120
+# Keep the NVIDIA-provided Torch/CUDA/TensorRT stack intact.
+RUN python -m pip install --no-cache-dir yacs einops evo numba \
+    opencv-python-headless plyfile matplotlib onnx onnxscript \
+    pyrealsense2==2.58.4.10922 rerun-sdk==0.37.2 viser==1.1.0 \
+    && python -m pip install --no-cache-dir --no-deps pypose==0.9.5 \
+    && python -m pip install --no-cache-dir --no-build-isolation --no-deps torch-scatter==2.1.2
+WORKDIR /opt/dpvo
+COPY setup.py ./
+COPY dpvo ./dpvo
+RUN python -m pip install --no-build-isolation --no-deps .
+COPY config ./config
+COPY calib ./calib
+COPY deploy/jetson ./deploy/jetson
+ENV PYTHONPATH=/opt/dpvo
+CMD ["python", "deploy/jetson/live_realsense.py", "--viewer", "viser", "--start-paused"]

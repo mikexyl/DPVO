@@ -1,0 +1,15 @@
+# Optional fallback for R36.4.4 hosts that omit nvidia-l4t-dla-compiler.
+# Extract only the matching library into the image; never install a host BSP package.
+ARG DPVO_RUNTIME_IMAGE=dpvo:jetson-jp62-viser
+FROM ${DPVO_RUNTIME_IMAGE}
+ARG DPVO_DLA_VERSION=36.4.4-20250616085344
+ARG DPVO_DLA_SHA256=01f0453a154e077a468c9bfb9b19c817cb130d207cd82d1d57487ffffe7c65b9
+RUN curl --retry 5 --retry-all-errors -fsSL \
+      "https://repo.download.nvidia.com/jetson/common/pool/main/n/nvidia-l4t-dla-compiler/nvidia-l4t-dla-compiler_${DPVO_DLA_VERSION}_arm64.deb" \
+      -o /tmp/dla.deb \
+    && echo "${DPVO_DLA_SHA256}  /tmp/dla.deb" | sha256sum -c - \
+    && dpkg-deb -x /tmp/dla.deb /tmp/dla \
+    && install -Dm644 /tmp/dla/usr/lib/aarch64-linux-gnu/nvidia/libnvdla_compiler.so \
+       /opt/dpvo/compat/lib/libnvdla_compiler.so \
+    && echo /opt/dpvo/compat/lib > /etc/ld.so.conf.d/dpvo-dla.conf \
+    && ldconfig && rm -rf /tmp/dla /tmp/dla.deb

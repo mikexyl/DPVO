@@ -1,0 +1,11 @@
+ARG DPVO_BASE_IMAGE=dpvo:jetson-jp7
+FROM ${DPVO_BASE_IMAGE}
+COPY deps/live-wheels /tmp/live-wheels
+RUN dpkg -i /tmp/live-wheels/libusb-1.0-0_*_arm64.deb
+RUN python -m pip install --no-index --find-links=/tmp/live-wheels \
+    pyrealsense2==2.58.4.10922 rerun-sdk==0.37.2
+COPY dpvo/rerun_viewer.py /opt/dpvo/dpvo/rerun_viewer.py
+COPY config/jetson_live.yaml /opt/dpvo/config/jetson_live.yaml
+COPY config/jetson_balanced.yaml /opt/dpvo/config/jetson_balanced.yaml
+COPY deploy/jetson /opt/dpvo/deploy/jetson
+CMD ["python", "deploy/jetson/live_realsense.py"]

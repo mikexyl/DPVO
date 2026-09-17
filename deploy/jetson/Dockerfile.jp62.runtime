@@ -1,0 +1,12 @@
+# Runtime compatibility layer, kept separate from the expensive native build.
+ARG DPVO_NATIVE_IMAGE=dpvo:jetson-jp62-native
+FROM ${DPVO_NATIVE_IMAGE}
+# NVIDIA's Torch wheel uses the NumPy 1.x ABI. Viser supports it; Rerun 0.37
+# requires NumPy 2 and is intentionally omitted from the JP6.2 runtime.
+RUN python -m pip uninstall -y rerun-sdk opencv-python opencv-python-headless plyfile \
+    && PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL= python -m pip install --no-cache-dir \
+    numpy==1.26.4 opencv-python-headless==4.11.0.86 plyfile==1.0.3 \
+    scipy==1.14.1 pandas==2.2.3
+COPY dpvo/viser_viewer.py ./dpvo/viser_viewer.py
+COPY deploy/jetson ./deploy/jetson
+CMD ["python", "deploy/jetson/live_realsense.py", "--viewer", "viser", "--start-paused"]
