@@ -55,8 +55,8 @@ def read_tum_rgb_list(sequence_dir: Path, rgb_list: str = "rgb.txt"):
 class TumRgbPlayer(Node):
     """Play a TUM RGB-D image sequence with per-frame DPVO acknowledgement."""
 
-    def __init__(self):
-        super().__init__("tum_player")
+    def __init__(self, **node_options):
+        super().__init__("tum_player", **node_options)
         self.declare_parameter("sequence_dir", "")
         self.declare_parameter("rgb_list", "rgb.txt")
         self.declare_parameter("image_topic", "camera/image_raw")

@@ -41,8 +41,8 @@ from .transport import Ros2DistributedTransport
 
 
 class MultiRobotDpvoNode(Node):
-    def __init__(self):
-        super().__init__("dpvo_multi_robot")
+    def __init__(self, **node_options):
+        super().__init__("dpvo_multi_robot", **node_options)
         self._declare_parameters()
 
         self.robot_id = self.get_parameter("robot_id").value

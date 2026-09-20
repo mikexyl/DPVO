@@ -12,11 +12,11 @@ from .online_common import robot_components, fleet_frame, parse_session_frame
 
 
 class OnlineCbsNode(CbsPgoNode):
-    def __init__(self):
+    def __init__(self, **node_options):
         self.revision = 0
         self.next_run = 0.0
         self.alignments = {}
-        super().__init__()
+        super().__init__(**node_options)
         self.alignment_publisher = self.create_publisher(String,
             '/dpvo_multi_robot/cbs/alignment_status',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -74,11 +74,18 @@ class OnlineCbsNode(CbsPgoNode):
         members, constraints = self._eligible(constraints, paths, sessions)
         if not members:
             return
-        constraints = [c for c in constraints if c.query_robot[0] in members
-                       and c.match_robot[0] in members]
-        super()._run(constraints, {r: paths[r] for r in members},
-            {r: sessions[r] for r in members}, online,
-            {r: timestamps[r] for r in members} if timestamps is not None else None)
+        groups = robot_components(members,
+            [(c.query_robot[0], c.match_robot[0]) for c in constraints])
+        # The offline solver requires a connected graph. Disjoint live groups
+        # have independent gauges and must never be optimized as one graph.
+        for group in groups:
+            if len(group) < 2:
+                continue
+            selected = [c for c in constraints if c.query_robot[0] in group
+                        and c.match_robot[0] in group]
+            super()._run(selected, {r: paths[r] for r in group},
+                {r: sessions[r] for r in group}, online,
+                {r: timestamps[r] for r in group} if timestamps is not None else None)
 
     def _report_alignment(self):
         # Preserve a stopped/disconnected robot's map, but never reuse a restarted session.
@@ -118,7 +125,9 @@ class OnlineCbsNode(CbsPgoNode):
                                    for group in groups if len(group) > 1 for r in group}
             self._pending_alignments = {}
             super()._publish_results(graph, output_dir, online, duration)
-            self.alignments = self._pending_alignments
+            # Keep other independently optimized components visible. Session
+            # validation in _report_alignment removes superseded estimates.
+            self.alignments.update(self._pending_alignments)
             self._report_alignment()
 
     def _publish_transform(self, key, transform, count, cost, residual_norm):

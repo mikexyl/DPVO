@@ -124,8 +124,8 @@ def _sim3_dict(transform):
 
 
 class CbsPgoNode(Node):
-    def __init__(self):
-        super().__init__("cbs_pgo")
+    def __init__(self, **node_options):
+        super().__init__("cbs_pgo", **node_options)
         self._declare_parameters()
         self.robot_ids = list(self.get_parameter("robot_ids").value)
         self.lock = threading.RLock()
@@ -141,6 +141,7 @@ class CbsPgoNode(Node):
         self.worker = None
         self.process = None
         self.run_index = 0
+        self.snapshot_index = 0
         self.rerun_enabled = False
 
         self._start_rerun()
@@ -232,6 +233,7 @@ class CbsPgoNode(Node):
         self.declare_parameter("done_topic_suffix", "dpvo/player_done")
         self.declare_parameter("global_frame", "world")
         self.declare_parameter("output_dir", "")
+        self.declare_parameter("archive_snapshots", False)
         self.declare_parameter("cbs_executable", "")
         self.declare_parameter("iterations", 200)
         self.declare_parameter("stage_mode", "alternating")
@@ -489,6 +491,11 @@ class CbsPgoNode(Node):
             if not configured_output:
                 raise ValueError("CBS output_dir is required")
             output_dir = Path(configured_output).expanduser()
+            if self.get_parameter("archive_snapshots").value:
+                self.snapshot_index += 1
+                output_dir = output_dir / f"cycle_{self.snapshot_index:05d}"
+                if output_dir.exists():
+                    raise FileExistsError(f"Refusing to overwrite CBS snapshot: {output_dir}")
             output_dir.mkdir(parents=True, exist_ok=True)
             graph = build_keyframe_graph(
                 constraints,
@@ -683,6 +690,10 @@ class CbsPgoNode(Node):
                 ),
                 key=lambda item: (item[0][1], item[0][2]),
             )
+            if not rows:
+                # A live solve may cover only one connected component. Do
+                # not clear the paths published by another component's solve.
+                continue
             message = PathMessage()
             message.header.stamp = stamp
             message.header.frame_id = frame
